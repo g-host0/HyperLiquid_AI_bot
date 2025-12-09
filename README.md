@@ -64,7 +64,7 @@ HyperLiquid_AI_bot/
 ## 📦 Установка
 ### 1. Клонирование репозитория
 git clone <https://github.com/g-host0/HyperLiquid_AI_bot.git>
-cd trading_bot
+cd HyperLiquid_AI_bot
 
 ### 2. Установка зависимостей
 pip install -r requirements.txt
