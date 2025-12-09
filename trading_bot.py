@@ -27,6 +27,8 @@ def init_db():
                 original_quantity REAL,
                 tp1_hit INTEGER DEFAULT 0,
                 tp2_hit INTEGER DEFAULT 0,
+                tp2_count INTEGER DEFAULT 0,
+                last_known_size REAL DEFAULT 0,
                 status TEXT DEFAULT 'open',
                 profit REAL DEFAULT 0.0,
                 opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -40,6 +42,8 @@ def init_db():
             ("original_quantity", "REAL"),
             ("tp1_hit", "INTEGER DEFAULT 0"),
             ("tp2_hit", "INTEGER DEFAULT 0"),
+            ("tp2_count", "INTEGER DEFAULT 0"),
+            ("last_known_size", "REAL DEFAULT 0"),
         ]
         
         for n, t in extra:
@@ -53,7 +57,7 @@ def init_db():
     conn.close()
 
 def sync_positions_with_exchange():
-    """Синхронизация позиций и БД"""
+    """Синхронизация позиций с биржей"""
     if TEST_MODE:
         return
     
@@ -68,6 +72,7 @@ def sync_positions_with_exchange():
     ex_pos_dict = {p["symbol"]: p for p in ex_positions}
     open_syms = set(ex_pos_dict.keys())
     
+    # Закрываем позиции которых больше нет на бирже
     for pos_id, sym_db, side, qty in local:
         hl_sym = sym_db.replace("USDT", "")
         if hl_sym not in ex_pos_dict:
@@ -76,6 +81,7 @@ def sync_positions_with_exchange():
                 (pos_id,),
             )
     
+    # Добавляем новые позиции с биржи
     for hl_sym, p in ex_pos_dict.items():
         sym_db = hl_sym + "USDT"
         side_db = "buy" if p["side"] == "long" else "sell"
@@ -89,8 +95,8 @@ def sync_positions_with_exchange():
                 """
                 INSERT INTO positions (
                     symbol, side, quantity, entry_price, position_value,
-                    atr, stop_loss, stop_loss_percent, original_quantity
-                ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?)
+                    atr, stop_loss, stop_loss_percent, original_quantity, last_known_size
+                ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)
                 """,
                 (
                     sym_db,
@@ -99,9 +105,11 @@ def sync_positions_with_exchange():
                     p["entry_price"],
                     abs(p["size"]) * p["entry_price"],
                     abs(p["size"]),
+                    abs(p["size"]),
                 ),
             )
     
+    # Удаляем ордера для закрытых позиций
     for o in ex_orders:
         coin = o["symbol"]
         if coin not in open_syms:
@@ -146,7 +154,8 @@ def display_positions_summary():
             sym = p["symbol"]
             side = p["side"].upper()
             size = abs(p["size"])
-            entry = p["entry_price"]
+            entry = p["entry_price"]  # Entry Price с биржи
+            
             cur = hl_api.get_mid_price(sym)
             
             if cur:
@@ -186,9 +195,9 @@ def display_positions_summary():
                     price_display = trig_px if trig_px else limit_px
                     
                     if price_display:
-                        print(f"    └─ {t}: ${price_display:.2f} ({pct:.0f}%)")
+                        print(f"    └─ {t}: ${price_display:.2f} ({pct:.0f}%, объём {sz:.4f})")
                     else:
-                        print(f"    └─ {t}: ({pct:.0f}%)")
+                        print(f"    └─ {t}: ({pct:.0f}%, объём {sz:.4f})")
     
     print("=" * 60 + "\n")
 
@@ -244,63 +253,52 @@ def calculate_position_size(symbol, data_dict_outer):
 def merge_positions(symbol, side, new_qty, new_price, new_atr):
     conn = sqlite3.connect("positions.db")
     row = conn.execute(
-        "SELECT id, quantity, entry_price, atr, original_quantity "
+        "SELECT id, quantity, atr, original_quantity "
         "FROM positions WHERE symbol=? AND side=? AND status='open'",
         (symbol, side),
     ).fetchone()
     
     if row:
-        pos_id, old_qty, old_price, old_atr, old_orig = row
+        pos_id, old_qty, old_atr, old_orig = row
         total = old_qty + new_qty
-        avg_price = (old_qty * old_price + new_qty * new_price) / total
         atr = (
             (old_qty * old_atr + new_qty * new_atr) / total
             if old_atr
             else new_atr
         )
         
-        sl = calculate_stop_loss(avg_price, side, atr)
-        sl_pct = abs((sl - avg_price) / avg_price * 100)
+        # При доборе позиции увеличиваем original_quantity
+        new_orig = (old_orig or old_qty) + new_qty
         
         conn.execute(
             """
             UPDATE positions
-            SET quantity=?, entry_price=?, position_value=?,
-                atr=?, stop_loss=?, stop_loss_percent=?, original_quantity=?
+            SET quantity=?, atr=?, original_quantity=?, last_known_size=?
             WHERE id=?
             """,
             (
                 total,
-                avg_price,
-                total * avg_price,
                 atr,
-                sl,
-                sl_pct,
-                (old_orig or old_qty) + new_qty,
+                new_orig,
+                total,
                 pos_id,
             ),
         )
-    else:
-        val = new_qty * new_price
-        sl = calculate_stop_loss(new_price, side, new_atr)
-        sl_pct = abs((sl - new_price) / new_price * 100)
         
+        print(f"📊 {symbol}: Добор позиции. Новый размер: {total:.4f} (было {old_qty:.4f})")
+    else:
         conn.execute(
             """
             INSERT INTO positions (
-                symbol, side, quantity, entry_price, position_value,
-                atr, stop_loss, stop_loss_percent, original_quantity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                symbol, side, quantity, atr, original_quantity, last_known_size
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 symbol,
                 side,
                 new_qty,
-                new_price,
-                val,
                 new_atr,
-                sl,
-                sl_pct,
+                new_qty,
                 new_qty,
             ),
         )
@@ -337,9 +335,9 @@ def place_order(symbol, side, quantity, atr):
         print("✅ Ордер исполнен")
         merge_positions(symbol, side, quantity, price, atr)
 
-# ---------- Проверка и установка SL/TP ----------
+# ---------- Проверка и управление SL/TP ----------
 def check_positions():
-    """Проверка и установка SL/TP"""
+    """Проверка позиций и динамическое управление SL/TP с учётом реальных объёмов биржи"""
     if TEST_MODE:
         return
     
@@ -356,17 +354,18 @@ def check_positions():
     
     conn = sqlite3.connect("positions.db")
     
-    checked_count = 0
+    updated_count = 0
+    
     for pos in ex_positions:
         sym = pos["symbol"]
         sym_db = sym + "USDT"
-        current_size = abs(pos["size"])
+        current_size = abs(pos["size"])  # РЕАЛЬНЫЙ объём с биржи
         side = "buy" if pos["side"] == "long" else "sell"
-        entry_price = pos["entry_price"]
+        entry_price = pos["entry_price"]  # СРЕДНЯЯ ЦЕНА С БИРЖИ (Entry Price)
         
         db_row = conn.execute(
             """
-            SELECT id, original_quantity, atr, tp1_hit, tp2_hit
+            SELECT id, original_quantity, atr, tp1_hit, tp2_hit, tp2_count, last_known_size
             FROM positions 
             WHERE symbol=? AND status='open' 
             ORDER BY opened_at DESC LIMIT 1
@@ -377,69 +376,203 @@ def check_positions():
         if not db_row:
             continue
         
-        pos_id, orig_qty, atr, tp1_hit, tp2_hit = db_row
+        pos_id, orig_qty, atr, tp1_hit, tp2_hit, tp2_count, last_known_size = db_row
         
-        if orig_qty and current_size < orig_qty * 0.95:
-            if not tp1_hit:
-                conn.execute(
-                    "UPDATE positions SET tp1_hit=1 WHERE id=?",
-                    (pos_id,),
-                )
-                conn.commit()
-                tp1_hit = 1
+        # Инициализация original_quantity если его нет
+        if not orig_qty or orig_qty == 0:
+            orig_qty = current_size
+            conn.execute(
+                "UPDATE positions SET original_quantity=?, last_known_size=? WHERE id=?",
+                (orig_qty, current_size, pos_id),
+            )
+            conn.commit()
+        
+        # Проверяем увеличилась ли позиция (добор)
+        position_increased = False
+        if last_known_size and current_size > last_known_size * 1.05:
+            # Добор! Увеличиваем original_quantity
+            size_increase = current_size - last_known_size
+            new_orig = orig_qty + size_increase
+            
+            print(f"📊 {sym}: Обнаружен добор позиции +{size_increase:.4f}")
+            print(f"   Средняя цена обновлена биржей: ${entry_price:.2f}")
+            
+            conn.execute(
+                "UPDATE positions SET original_quantity=?, last_known_size=? WHERE id=?",
+                (new_orig, current_size, pos_id),
+            )
+            conn.commit()
+            orig_qty = new_orig
+            position_increased = True
+            
+            # ПРИ ДОБОРЕ УДАЛЯЕМ ВСЕ СТАРЫЕ ОРДЕРА
+            triggers = [o for o in ex_orders if o["symbol"] == sym and o["is_trigger"]]
+            if triggers:
+                print(f"   🗑️ Удаление {len(triggers)} старых ордеров для пересоздания...")
+                for o in triggers:
+                    hl_api.cancel_order(sym, o["oid"])
+                    time.sleep(0.2)
+                # Обновляем список ордеров
+                time.sleep(0.5)
+                ex_orders = hl_api.get_open_orders()
+        
+        # Обновляем last_known_size
+        if abs(current_size - (last_known_size or 0)) > 0.01:
+            conn.execute(
+                "UPDATE positions SET last_known_size=? WHERE id=?",
+                (current_size, pos_id),
+            )
+            conn.commit()
+        
+        # Вычисляем процент ОТНОСИТЕЛЬНО НАЧАЛЬНОГО объёма (с учётом добора)
+        remaining_pct = (current_size / orig_qty * 100) if orig_qty > 0 else 100
         
         triggers = [o for o in ex_orders if o["symbol"] == sym and o["is_trigger"]]
         
         sl_orders = [o for o in triggers if o.get("tpsl") == "sl"]
         tp_orders = [o for o in triggers if o.get("tpsl") == "tp"]
         
-        has_sl = len(sl_orders) > 0
-        has_tp = len(tp_orders) > 0
+        # Проверяем корректность цен и объёмов SL/TP
+        needs_sl_update = False
+        needs_tp_update = False
         
-        if not atr or atr == 0:
-            atr = 0.0
+        if sl_orders:
+            for sl_order in sl_orders:
+                sl_size = sl_order["size"]
+                sl_price = sl_order.get("trigger_price") or sl_order.get("limit_price")
+                
+                # Проверяем объём SL (погрешность 1%)
+                if abs(sl_size - current_size) > current_size * 0.01:
+                    print(f"⚠️ {sym}: Некорректный объём SL ({sl_size:.4f} != {current_size:.4f})")
+                    needs_sl_update = True
+                
+                # Проверяем корректность цены SL
+                if tp1_hit:
+                    # После TP1 должен быть в безубытке
+                    if sl_price and abs(sl_price - entry_price) > entry_price * 0.005:  # погрешность 0.5%
+                        print(f"⚠️ {sym}: SL не в безубытке (${sl_price:.2f} != ${entry_price:.2f})")
+                        needs_sl_update = True
+                else:
+                    # До TP1 должен быть по ATR
+                    if atr and atr > 0:
+                        expected_sl = calculate_stop_loss(entry_price, side, atr)
+                        if sl_price and abs(sl_price - expected_sl) > expected_sl * 0.01:
+                            print(f"⚠️ {sym}: Некорректная цена SL (${sl_price:.2f} != ${expected_sl:.2f})")
+                            needs_sl_update = True
+                
+                if needs_sl_update:
+                    hl_api.cancel_order(sym, sl_order["oid"])
+                    time.sleep(0.3)
+        else:
+            needs_sl_update = True  # SL вообще нет
         
-        if not has_sl:
-            if atr > 0:
-                sl_price = calculate_stop_loss(entry_price, side, atr)
-                result = hl_api.set_sl_only(sym, sl_price)
-                if result and result.get("status") == "ok":
-                    checked_count += 1
-                time.sleep(0.5)
+        # Проверяем корректность TP
+        if tp_orders:
+            for tp_order in tp_orders:
+                tp_price = tp_order.get("trigger_price") or tp_order.get("limit_price")
+                tp_size = tp_order["size"]
+                
+                # Проверяем направление TP
+                if side == "buy":
+                    if tp_price and tp_price < entry_price:
+                        print(f"⚠️ {sym}: TP ниже entry (${tp_price:.2f} < ${entry_price:.2f})")
+                        needs_tp_update = True
+                else:
+                    if tp_price and tp_price > entry_price:
+                        print(f"⚠️ {sym}: TP выше entry (${tp_price:.2f} > ${entry_price:.2f})")
+                        needs_tp_update = True
+                
+                # Проверяем размер TP
+                if not tp1_hit:
+                    expected_tp_size = orig_qty * (TAKE_PROFIT_1_SIZE_PERCENT / 100)
+                    if abs(tp_size - expected_tp_size) > expected_tp_size * 0.05:
+                        print(f"⚠️ {sym}: Некорректный размер TP1 ({tp_size:.4f} != {expected_tp_size:.4f})")
+                        needs_tp_update = True
+                
+                if needs_tp_update:
+                    hl_api.cancel_order(sym, tp_order["oid"])
+                    time.sleep(0.3)
+        else:
+            needs_tp_update = True  # TP вообще нет
         
-        if not has_tp and not tp1_hit:
-            if side == "buy":
-                tp1_price = entry_price * (1 + TAKE_PROFIT_1_PERCENT / 100)
-            else:
-                tp1_price = entry_price * (1 - TAKE_PROFIT_1_PERCENT / 100)
+        # ЛОГИКА TP1: срабатывает когда позиция уменьшилась до ~70%
+        if remaining_pct <= 75 and not tp1_hit:
+            print(f"✅ {sym}: TP1 сработал ({remaining_pct:.1f}% осталось), SL → безубыток @ ${entry_price:.2f}")
             
-            tp1_size = current_size * (TAKE_PROFIT_1_SIZE_PERCENT / 100)
-            result = hl_api.set_tp_only(sym, tp1_price, tp1_size)
-            if result and result.get("status") == "ok":
-                checked_count += 1
+            conn.execute(
+                "UPDATE positions SET tp1_hit=1 WHERE id=?",
+                (pos_id,),
+            )
+            conn.commit()
+            tp1_hit = 1
+            needs_sl_update = True
+            needs_tp_update = True
+        
+        # ЛОГИКА TP2: срабатывает когда позиция уменьшилась до ~35-40%
+        if remaining_pct <= 45 and tp1_hit and not tp2_hit:
+            print(f"✅ {sym}: TP2 сработал ({remaining_pct:.1f}% осталось), установка следующего TP2")
+            
+            conn.execute(
+                "UPDATE positions SET tp2_hit=1, tp2_count=tp2_count+1 WHERE id=?",
+                (pos_id,),
+            )
+            conn.commit()
+            tp2_hit = 1
+            tp2_count += 1
+            needs_tp_update = True
+        
+        # СОЗДАНИЕ/ОБНОВЛЕНИЕ SL
+        if needs_sl_update:
+            if tp1_hit:
+                # После TP1 - безубыток
+                result = hl_api.set_sl_only(sym, entry_price)
+                if result and result.get("status") == "ok":
+                    print(f"   ✅ SL установлен в безубыток @ ${entry_price:.2f}")
+                    updated_count += 1
+            else:
+                # До TP1 - по ATR
+                if atr and atr > 0:
+                    sl_price = calculate_stop_loss(entry_price, side, atr)
+                    result = hl_api.set_sl_only(sym, sl_price)
+                    if result and result.get("status") == "ok":
+                        print(f"   ✅ SL установлен по ATR @ ${sl_price:.2f}")
+                        updated_count += 1
             time.sleep(0.5)
         
-        if tp1_hit and not tp2_hit and not has_tp:
-            if side == "buy":
-                tp2_price = entry_price * (1 + TAKE_PROFIT_2_PERCENT / 100)
-            else:
-                tp2_price = entry_price * (1 - TAKE_PROFIT_2_PERCENT / 100)
+        # СОЗДАНИЕ/ОБНОВЛЕНИЕ TP
+        if needs_tp_update:
+            if not tp1_hit:
+                # Устанавливаем TP1
+                if side == "buy":
+                    tp1_price = entry_price * (1 + TAKE_PROFIT_1_PERCENT / 100)
+                else:
+                    tp1_price = entry_price * (1 - TAKE_PROFIT_1_PERCENT / 100)
+                
+                tp1_size = orig_qty * (TAKE_PROFIT_1_SIZE_PERCENT / 100)
+                result = hl_api.set_tp_only(sym, tp1_price, tp1_size)
+                if result and result.get("status") == "ok":
+                    print(f"   ✅ TP1 установлен @ ${tp1_price:.2f} ({TAKE_PROFIT_1_SIZE_PERCENT}%)")
+                    updated_count += 1
             
-            tp2_size = current_size * (TAKE_PROFIT_2_SIZE_PERCENT / 100)
-            result = hl_api.set_tp_only(sym, tp2_price, tp2_size)
-            if result and result.get("status") == "ok":
-                checked_count += 1
-                conn.execute(
-                    "UPDATE positions SET tp2_hit=0 WHERE id=?",
-                    (pos_id,),
-                )
-                conn.commit()
+            elif tp1_hit and remaining_pct > 45:
+                # Устанавливаем TP2
+                if side == "buy":
+                    tp2_price = entry_price * (1 + (TAKE_PROFIT_2_PERCENT * (tp2_count + 1)) / 100)
+                else:
+                    tp2_price = entry_price * (1 - (TAKE_PROFIT_2_PERCENT * (tp2_count + 1)) / 100)
+                
+                tp2_size = current_size * (TAKE_PROFIT_2_SIZE_PERCENT / 100)
+                result = hl_api.set_tp_only(sym, tp2_price, tp2_size)
+                if result and result.get("status") == "ok":
+                    print(f"   ✅ TP2 установлен @ ${tp2_price:.2f} ({TAKE_PROFIT_2_SIZE_PERCENT}%)")
+                    updated_count += 1
+            
             time.sleep(0.5)
     
     conn.close()
     
-    if checked_count > 0:
-        print(f"✅ Проверка позиций: обработано {checked_count}")
+    if updated_count > 0:
+        print(f"✅ Управление позициями: обновлено {updated_count}")
 
 # ---------- Главный цикл ----------
 def main():
@@ -464,9 +597,11 @@ def main():
         sync_positions_with_exchange()
     
     print("=" * 60)
-    print(f"📊 TP1: +{TAKE_PROFIT_1_PERCENT}% ({TAKE_PROFIT_1_SIZE_PERCENT}%)")
-    print(f"📊 TP2: +{TAKE_PROFIT_2_PERCENT}% ({TAKE_PROFIT_2_SIZE_PERCENT}%)")
-    print(f"📊 SL: ATR×{ATR_MULTIPLIER}")
+    print(f"📊 TP1: +{TAKE_PROFIT_1_PERCENT}% ({TAKE_PROFIT_1_SIZE_PERCENT}% позиции)")
+    print(f"📊 TP2: +{TAKE_PROFIT_2_PERCENT}% ({TAKE_PROFIT_2_SIZE_PERCENT}% остатка)")
+    print(f"📊 После TP1: SL → безубыток (Entry Price)")
+    print(f"📊 После TP2: новый TP2 на остаток")
+    print(f"📊 Начальный SL: ATR×{ATR_MULTIPLIER}")
     print("=" * 60)
     
     while True:
@@ -507,6 +642,8 @@ def main():
         
         except Exception as e:
             print(f"❌ Ошибка: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(INTERVAL)
 
 if __name__ == "__main__":

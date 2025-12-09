@@ -10,32 +10,37 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # Настройки бота
-SYMBOLS = ["ETHUSDT", "BTCUSDT", "BNBUSDT", "SOLUSDT"]
+SYMBOLS = ["ETHUSDT", "BTCUSDT", "BNBUSDT", "SOLUSDT", "MONUSDT"]
 MAX_SYMBOLS = 5
-POSITION_SIZE_PERCENT = 100.0
-MAX_TOTAL_POSITION_PERCENT = 400.0
-LIMIT_1D = 360
-LIMIT_1H = 168
-LIMIT_1M = 1440
-INTERVAL = 600
-TEST_MODE = False
+POSITION_SIZE_PERCENT = 100.0 # Размер открытия позиции в % от депозита
+MAX_TOTAL_POSITION_PERCENT = 400.0 # Максимальная суммарная позиция в % от депозита по одному символу
+LIMIT_1D = 360 # год дневных данных
+LIMIT_1H = 168 # 1 неделя часовых данных (24*7)
+LIMIT_1M = 1440 # 1 день минутных данных (24*60)
+INTERVAL = 600 # Секунд между прогонками
+TEST_MODE = False # Симуляция
 TEST_BALANCE = 1000.0
-USE_HYPERLIQUID = True
+USE_HYPERLIQUID = True # Использовать HyperLiquid как источник данных
 
 # Настройки риска
-TAKE_PROFIT_1_PERCENT = 1.0
-TAKE_PROFIT_1_SIZE_PERCENT = 30.0
-TAKE_PROFIT_2_PERCENT = 2.5
-TAKE_PROFIT_2_SIZE_PERCENT = 50.0
-ATR_MULTIPLIER = 1.5
+TAKE_PROFIT_1_PERCENT = 1.0 # TP1 тейк, после него ставится SL в б/у
+TAKE_PROFIT_1_SIZE_PERCENT = 30.0 # Размер позиции для TP1
+TAKE_PROFIT_2_PERCENT = 5.0 # TP2 и последующие
+TAKE_PROFIT_2_SIZE_PERCENT = 30.0 # Размер позиции для TP2
+ATR_MULTIPLIER = 1.5 # Мультипликатор ATR 1h свечей для начального SL
 
 # AI настройки
-USE_PERPLEXITY = False
-USE_OPENROUTER = True
+USE_PERPLEXITY = True # Использовать Perplexity AI
+USE_OPENROUTER = True # Использовать OpenRouter (DeepSeek)
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
 OPENROUTER_MODEL = "deepseek/deepseek-chat"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Стратегия объединения сигналов при использовании обоих AI
+# "unanimous" - оба AI должны дать одинаковый сигнал
+# "priority_perplexity" - приоритет Perplexity, OpenRouter для подтверждения
+# "priority_openrouter" - приоритет OpenRouter, Perplexity для подтверждения
+# "any" - любой сигнал от любого AI
 SIGNAL_STRATEGY = "any"
 
 # Промпт для AI (универсальный для всех сетей)
@@ -59,7 +64,7 @@ Action: buy_ETHUSDT | sell_BTCUSDT | hold
 Reason: [Очень краткое обоснование на русском, не более 20 слов]"""
 
 # Hyperliquid настройки
-USE_TESTNET = True
+USE_TESTNET = True # True = testnet, False = mainnet
 HYPERLIQUID_MAINNET_API = "https://api.hyperliquid.xyz"
 HYPERLIQUID_TESTNET_API = "https://api.hyperliquid-testnet.xyz"
 HYPERLIQUID_API_URL = HYPERLIQUID_TESTNET_API if USE_TESTNET else HYPERLIQUID_MAINNET_API
