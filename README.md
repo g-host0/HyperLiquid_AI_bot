@@ -84,10 +84,3 @@ SIGNAL_STRATEGY = "priority_perplexity"
 bash
 python3 trading_bot.py
 
-
-
-API Testnet
-wallet
-0xe5ce56c9b1ebeddd165ce0a286352864f9f2aec1
-privat
-0x3186964f3bf12f815d49357dbb254ea45c6b0cfcb0498d3e4fcd99445f269ed6
