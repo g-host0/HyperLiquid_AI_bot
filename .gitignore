@@ -1,0 +1,38 @@
+# Приватные конфигурационные файлы
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Ключи и сертификаты
+*.pem
+*.key
+*.crt
+*.p12
+
+# Файлы IDE
+.vscode/
+.idea/
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+
+# Зависимости
+node_modules/
+__pycache__/
+
+# Логи
+*.log
+npm-debug.log*
+
+# Базы данных
+*.db
+*.sqlite
+
+__pycache__/
+*.py[cod]
+.env
+venv/
+*.pem
