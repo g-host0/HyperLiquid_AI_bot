@@ -48,15 +48,11 @@ def get_market_data(symbols):
                             "c": float(c.get('c', 0)),
                             "v": float(c.get('v', 0))
                         } for c in candles]
-                        print(f"✅ Hyperliquid: {symbol} {interval} - получено {len(candles)} свечей")
                     else:
                         data_dict[interval] = []
-                        print(f"⚠️ Hyperliquid: {symbol} {interval} - нет данных")
                 else:
                     data_dict[interval] = []
-                    print(f"❌ Hyperliquid info API недоступен")
             except Exception as e:
-                print(f"❌ Ошибка Hyperliquid для {symbol} {interval}: {e}")
                 data_dict[interval] = []
         
         data_dict_outer[symbol] = data_dict
@@ -85,7 +81,7 @@ def compress_market_data(data_dict_outer):
                         f"\n  {interval}: {trend} O:{last['o']:.4f} H:{last['h']:.4f} "
                         f"L:{last['l']:.4f} C:{last['c']:.4f} | "
                         f"MaxH:{high_max:.4f} MinL:{low_min:.4f} Vol:{avg_volume:.2f} "
-                        f"({len(candles)} свеч)"
+                        f"({len(candles)} свечей)"
                     )
                 else:
                     summary += f"\n  {interval}: Нет данных"
@@ -124,14 +120,11 @@ def call_ai_api(api_url, headers, payload, api_name):
         response = requests.post(api_url, json=payload, headers=headers, timeout=120)
         
         if response.status_code != 200:
-            print(f"Ошибка API {api_name}: {response.status_code}")
-            print(f"Ответ: {response.text[:500]}")
             return None, f'Ошибка API: {response.status_code}'
         
         result_json = response.json()
         result = result_json['choices'][0]['message']['content'].strip()
         
-        # Парсинг результата
         action_line, reason_line = None, None
         for line in result.split('\n'):
             if line.startswith('Action:'):
@@ -140,14 +133,11 @@ def call_ai_api(api_url, headers, payload, api_name):
                 reason_line = line.split('Reason:')[1].strip()
         
         if not action_line or not reason_line:
-            return None, f'Неверный формат ответа: {result}'
+            return None, f'Неверный формат ответа'
         
         return action_line, reason_line
     
     except Exception as e:
-        print(f"Ошибка {api_name} AI: {e}")
-        import traceback
-        traceback.print_exc()
         return None, f'Ошибка анализа: {str(e)[:50]}'
 
 def analyze_with_perplexity(data_dict_outer):
@@ -160,7 +150,6 @@ def analyze_with_perplexity(data_dict_outer):
     
     api_key = os.getenv("PERPLEXITY_API_KEY")
     if not api_key:
-        print("❌ PERPLEXITY_API_KEY не найден в переменных окружения!")
         return 'hold', 'API ключ не найден'
     
     url = "https://api.perplexity.ai/chat/completions"
@@ -198,7 +187,6 @@ def analyze_with_openrouter(data_dict_outer):
     
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        print("❌ OPENROUTER_API_KEY не найден в переменных окружения!")
         return 'hold', 'API ключ не найден'
     
     url = f"{OPENROUTER_BASE_URL}/chat/completions"
@@ -235,30 +223,30 @@ def combine_ai_signals(perplexity_signal, openrouter_signal, strategy):
         if pplx_action == or_action:
             return pplx_action, f"Perplexity: {pplx_reason} | OpenRouter: {or_reason}"
         else:
-            return 'hold', f"Сигналы расходятся. Perplexity: {pplx_action} ({pplx_reason}) | OpenRouter: {or_action} ({or_reason})"
+            return 'hold', f"Сигналы расходятся"
     
     elif strategy == "priority_perplexity":
         if pplx_action != 'hold':
             if or_action == pplx_action:
-                return pplx_action, f"✓ Подтверждено обоими: {pplx_reason}"
+                return pplx_action, f"✓ Подтверждено: {pplx_reason}"
             else:
-                return pplx_action, f"⚠ Perplexity: {pplx_reason} (OpenRouter не подтвердил: {or_action})"
-        return 'hold', f"Perplexity: hold | OpenRouter: {or_action}"
+                return pplx_action, f"⚠ {pplx_reason}"
+        return 'hold', f"Hold"
     
     elif strategy == "priority_openrouter":
         if or_action != 'hold':
             if pplx_action == or_action:
-                return or_action, f"✓ Подтверждено обоими: {or_reason}"
+                return or_action, f"✓ Подтверждено: {or_reason}"
             else:
-                return or_action, f"⚠ OpenRouter: {or_reason} (Perplexity не подтвердил: {pplx_action})"
-        return 'hold', f"OpenRouter: hold | Perplexity: {pplx_action}"
+                return or_action, f"⚠ {or_reason}"
+        return 'hold', f"Hold"
     
     elif strategy == "any":
         if pplx_action != 'hold':
-            return pplx_action, f"Perplexity: {pplx_reason}"
+            return pplx_action, pplx_reason
         elif or_action != 'hold':
-            return or_action, f"OpenRouter: {or_reason}"
-        return 'hold', "Оба AI рекомендуют hold"
+            return or_action, or_reason
+        return 'hold', "Hold"
     
     return 'hold', 'Неизвестная стратегия'
 
@@ -267,19 +255,15 @@ def analyze_with_ai(data_dict_outer):
     signals = []
     
     if USE_PERPLEXITY:
-        print("📊 Запрос к Perplexity AI...")
         perplexity_signal = analyze_with_perplexity(data_dict_outer)
-        print(f"  Perplexity: {perplexity_signal[0]} - {perplexity_signal[1]}")
         signals.append(('perplexity', perplexity_signal))
     
     if USE_OPENROUTER:
-        print("📊 Запрос к OpenRouter (DeepSeek)...")
         openrouter_signal = analyze_with_openrouter(data_dict_outer)
-        print(f"  OpenRouter: {openrouter_signal[0]} - {openrouter_signal[1]}")
         signals.append(('openrouter', openrouter_signal))
     
     if not signals:
-        return 'hold', 'Нет активных AI для анализа (проверьте USE_PERPLEXITY и USE_OPENROUTER в config)'
+        return 'hold', 'Нет активных AI для анализа'
     
     if len(signals) == 1:
         return signals[0][1]

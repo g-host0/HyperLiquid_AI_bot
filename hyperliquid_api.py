@@ -30,14 +30,7 @@ class HyperliquidAPI:
         self.private_key = HYPERLIQUID_PRIVATE_KEY
         self.network = "Testnet" if USE_TESTNET else "Mainnet"
         
-        print(f"🌐 Hyperliquid API инициализирован: {self.network}")
-        print(f"  URL: {self.api_url}")
-        print(f"  Account: {self.account_address}")
-        
-        if not self.account_address:
-            print("  ⚠️ HYPERLIQUID_ACCOUNT_ADDRESS не установлен")
-        if not self.private_key:
-            print("  ⚠️ HYPERLIQUID_PRIVATE_KEY не установлен")
+        print(f"🌐 Hyperliquid: {self.network}")
         
         self.exchange = None
         self.info = None
@@ -66,14 +59,12 @@ class HyperliquidAPI:
                     skip_ws=True,
                 )
                 
-                print("  ✅ SDK инициализирован успешно")
-                print(f"  📝 Wallet address: {wallet.address}")
+                print(f"✅ SDK инициализирован")
             except Exception as e:
-                print(f"  ⚠️ Ошибка инициализации SDK: {e}")
+                print(f"⚠️ Ошибка SDK: {e}")
                 self.exchange = None
                 self.info = None
 
-    # ---------- базовая информация ----------
     def get_user_state(self):
         if not self.account_address:
             return None
@@ -130,7 +121,7 @@ class HyperliquidAPI:
             return []
 
     def get_open_orders(self):
-        """openOrders с полем tpsl"""
+        """Получает открытые ордера с определением trigger-ордеров"""
         if not self.account_address:
             return []
         
@@ -148,26 +139,110 @@ class HyperliquidAPI:
                 return []
             
             data = r.json()
+            
+            positions = self.get_open_positions()
+            pos_sizes = {p["symbol"]: abs(p["size"]) for p in positions}
+            
             res = []
             for o in data:
+                is_reduce_only = o.get("reduceOnly", False)
+                coin = o.get("coin", "")
+                size = float(o.get("sz", 0))
+                
+                tpsl = None
+                is_trigger = False
+                
+                if is_reduce_only and coin in pos_sizes:
+                    is_trigger = True
+                    pos_size = pos_sizes[coin]
+                    
+                    if size >= pos_size * 0.95:
+                        tpsl = "sl"
+                    else:
+                        tpsl = "tp"
+                
                 trigger_px = o.get("triggerPx")
-                res.append(
-                    {
-                        "symbol": o.get("coin", ""),
-                        "oid": o.get("oid"),
-                        "side": o.get("side"),
-                        "size": float(o.get("sz", 0)),
-                        "limit_price": float(o.get("limitPx", 0)),
-                        "trigger_price": float(trigger_px) if trigger_px else None,
-                        "order_type": o.get("orderType", ""),
-                        "is_trigger": trigger_px is not None,
-                        "tpsl": o.get("tpsl"),  # 'sl' / 'tp' / None
-                    }
-                )
+                limit_px = o.get("limitPx")
+                
+                order_type = o.get("orderType", "Limit" if not is_reduce_only else "Stop/TP")
+                
+                order_info = {
+                    "symbol": coin,
+                    "oid": o.get("oid"),
+                    "side": o.get("side"),
+                    "size": size,
+                    "limit_price": float(limit_px) if limit_px else 0.0,
+                    "trigger_price": float(trigger_px) if trigger_px else None,
+                    "order_type": order_type,
+                    "is_trigger": is_trigger,
+                    "tpsl": tpsl,
+                    "reduce_only": is_reduce_only,
+                }
+                
+                res.append(order_info)
+            
             return res
-        except Exception as e:
-            print(f"❌ Ошибка получения ордеров: {e}")
+        
+        except Exception:
             return []
+
+    def cleanup_duplicate_orders(self):
+        """Удаляет дублирующиеся SL/TP ордера"""
+        if not SDK_AVAILABLE or not self.exchange:
+            return
+        
+        orders = self.get_open_orders()
+        positions = self.get_open_positions()
+        pos_symbols = {p["symbol"] for p in positions}
+        
+        trigger_orders = [o for o in orders if o["is_trigger"]]
+        
+        if not trigger_orders:
+            return
+        
+        from collections import defaultdict
+        grouped = defaultdict(lambda: {"sl": [], "tp": []})
+        
+        for o in trigger_orders:
+            sym = o["symbol"]
+            tpsl = o.get("tpsl")
+            
+            if tpsl == "sl":
+                grouped[sym]["sl"].append(o)
+            elif tpsl == "tp":
+                grouped[sym]["tp"].append(o)
+        
+        total_deleted = 0
+        for sym, types in grouped.items():
+            if sym not in pos_symbols:
+                for tpsl_type in ["sl", "tp"]:
+                    for o in types[tpsl_type]:
+                        try:
+                            self.exchange.cancel(sym, o["oid"])
+                            total_deleted += 1
+                            time.sleep(0.15)
+                        except:
+                            pass
+                continue
+            
+            for tpsl_type in ["sl", "tp"]:
+                orders_list = types[tpsl_type]
+                if len(orders_list) > 1:
+                    orders_list.sort(key=lambda x: int(x["oid"]), reverse=True)
+                    to_delete = orders_list[1:]
+                    
+                    for o in to_delete:
+                        try:
+                            result = self.exchange.cancel(sym, o["oid"])
+                            if result and result.get("status") == "ok":
+                                total_deleted += 1
+                            time.sleep(0.2)
+                        except:
+                            pass
+        
+        if total_deleted > 0:
+            print(f"✅ Очистка дублей: удалено {total_deleted}")
+            time.sleep(1.5)
 
     def get_market_info(self):
         try:
@@ -199,19 +274,11 @@ class HyperliquidAPI:
     def round_to_tick_size(self, price, tick_size):
         return round(price / tick_size) * tick_size
 
-    # ---------- обычные ордера ----------
     def place_order(self, symbol, side, quantity, order_type="Market", price=None):
-        if not SDK_AVAILABLE:
-            print("❌ SDK не установлен")
-            return None
-        
-        if not self.exchange:
-            print("❌ Exchange не инициализирован")
+        if not SDK_AVAILABLE or not self.exchange:
             return None
         
         try:
-            print(f"📤 Размещение ордера: {side.upper()} {quantity} {symbol}")
-            
             markets = self.get_market_info()
             sz_dec = 4
             tick = 0.1
@@ -226,7 +293,6 @@ class HyperliquidAPI:
             mid = self.get_mid_price(symbol)
             
             if not mid:
-                print(f"  ❌ Не удалось взять цену {symbol}")
                 return None
             
             is_buy = side.lower() == "buy"
@@ -243,44 +309,9 @@ class HyperliquidAPI:
                 reduce_only=False,
             )
             
-            print(f"  API result: {res}")
             return res
-        
-        except Exception as e:
-            print(f"❌ Ошибка размещения ордера: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
             return None
-
-    def cancel_all_orders(self, symbol):
-        if not SDK_AVAILABLE or not self.exchange:
-            return False
-        
-        try:
-            orders = self.get_open_orders()
-            to_cancel = [o for o in orders if o["symbol"] == symbol]
-            
-            if not to_cancel:
-                return True
-            
-            print(f"  🗑️ Отмена {len(to_cancel)} ордеров для {symbol}")
-            ok = 0
-            
-            for o in to_cancel:
-                try:
-                    r = self.exchange.cancel(symbol, o["oid"])
-                    if r and r.get("status") == "ok":
-                        ok += 1
-                    time.sleep(0.2)
-                except Exception as e:
-                    print(f"  ❌ Ошибка отмены oid={o['oid']}: {e}")
-            
-            print(f"  ✅ Отменено {ok} из {len(to_cancel)}")
-            return ok > 0
-        
-        except Exception as e:
-            print(f"  ❌ Ошибка cancel_all_orders: {e}")
-            return False
 
     def cancel_order(self, symbol, oid):
         if not SDK_AVAILABLE or not self.exchange:
@@ -288,172 +319,12 @@ class HyperliquidAPI:
         
         try:
             return self.exchange.cancel(symbol, oid)
-        except Exception as e:
-            print(f"❌ Ошибка отмены ордера: {e}")
-            return None
-
-    # ---------- установка SL/TP ----------
-    def set_position_sltp(
-        self,
-        symbol,
-        stop_loss_price=None,
-        take_profit_price=None,
-        tp_size_percent=30.0,
-    ):
-        """
-        УСТАРЕВШАЯ ФУНКЦИЯ - оставлена для совместимости.
-        Перед установкой новых SL/TP удаляем ВСЕ trigger‑ордера по symbol.
-        После этого создаётся максимум 1 SL + 1 TP.
-        
-        Рекомендуется использовать set_sl_only() и set_tp_only()
-        """
-        if not SDK_AVAILABLE or not self.exchange:
-            print("❌ SDK не инициализирован")
-            return None
-        
-        try:
-            positions = self.get_open_positions()
-            position = next((p for p in positions if p["symbol"] == symbol), None)
-            
-            if not position:
-                print(f"  ⚠️ Позиция {symbol} не найдена")
-                return None
-            
-            size = abs(position["size"])
-            is_long = position["side"] == "long"
-            
-            markets = self.get_market_info()
-            tick = 0.1
-            sz_dec = 4
-            
-            for m in markets:
-                if m.get("name") == symbol:
-                    sz_dec = m.get("szDecimals", 4)
-                    tick = 0.01 if sz_dec == 5 else 0.1
-                    break
-            
-            sl_price = (
-                self.round_to_tick_size(stop_loss_price, tick)
-                if stop_loss_price
-                else None
-            )
-            
-            tp_price = (
-                self.round_to_tick_size(take_profit_price, tick)
-                if take_profit_price
-                else None
-            )
-            
-            tp_size = None
-            if tp_price:
-                tp_size = round(size * (tp_size_percent / 100.0), sz_dec)
-                if tp_size <= 0:
-                    tp_size = round(size * 0.3, sz_dec)
-                if tp_size > size:
-                    tp_size = size
-            
-            # Удаляем все существующие trigger-ордера
-            existing = self.get_open_orders()
-            triggers = [
-                o
-                for o in existing
-                if o["symbol"] == symbol and o["is_trigger"]
-            ]
-            
-            if triggers:
-                print(
-                    f"  🧹 Полная зачистка {len(triggers)} SL/TP ордеров по {symbol}"
-                )
-                for o in triggers:
-                    try:
-                        self.exchange.cancel(symbol, o["oid"])
-                        time.sleep(0.2)
-                    except Exception as e:
-                        print(f"  ❌ Ошибка отмены oid={o['oid']}: {e}")
-                
-                time.sleep(0.5)
-            
-            results = {"sl": None, "tp": None}
-            
-            # Устанавливаем SL
-            if sl_price:
-                sl_side = not is_long
-                print(
-                    f"  📍 Новый SL {symbol}: price={sl_price}, size={size}"
-                )
-                
-                try:
-                    sl_res = self.exchange.order(
-                        symbol,
-                        sl_side,
-                        size,
-                        sl_price,
-                        {
-                            "trigger": {
-                                "triggerPx": sl_price,
-                                "isMarket": True,
-                                "tpsl": "sl",
-                            }
-                        },
-                        reduce_only=True,
-                    )
-                    
-                    results["sl"] = sl_res
-                    if sl_res and sl_res.get("status") == "ok":
-                        print("  ✅ SL установлен")
-                    else:
-                        print(f"  ❌ Ошибка SL: {sl_res}")
-                except Exception as e:
-                    print(f"  ❌ Ошибка SL: {e}")
-                
-                time.sleep(0.3)
-            
-            # Устанавливаем TP
-            if tp_price and tp_size:
-                tp_side = not is_long
-                print(
-                    f"  📍 Новый TP {symbol}: price={tp_price}, size={tp_size}"
-                )
-                
-                try:
-                    tp_res = self.exchange.order(
-                        symbol,
-                        tp_side,
-                        tp_size,
-                        tp_price,
-                        {
-                            "trigger": {
-                                "triggerPx": tp_price,
-                                "isMarket": True,
-                                "tpsl": "tp",
-                            }
-                        },
-                        reduce_only=True,
-                    )
-                    
-                    results["tp"] = tp_res
-                    if tp_res and tp_res.get("status") == "ok":
-                        print("  ✅ TP установлен")
-                    else:
-                        print(f"  ❌ Ошибка TP: {tp_res}")
-                except Exception as e:
-                    print(f"  ❌ Ошибка TP: {e}")
-            
-            return results
-        
-        except Exception as e:
-            print(f"❌ Ошибка set_position_sltp: {e}")
-            import traceback
-            traceback.print_exc()
+        except:
             return None
 
     def set_sl_only(self, symbol, stop_loss_price):
-        """
-        Устанавливает только SL ордер для позиции.
-        Не удаляет существующие ордера - используется для точечной установки.
-        """
+        """Устанавливает только SL ордер"""
         if not SDK_AVAILABLE or not self.exchange:
-            print("❌ SDK не инициализирован")
             return None
         
         try:
@@ -461,7 +332,6 @@ class HyperliquidAPI:
             position = next((p for p in positions if p["symbol"] == symbol), None)
             
             if not position:
-                print(f"  ⚠️ Позиция {symbol} не найдена")
                 return None
             
             size = abs(position["size"])
@@ -480,8 +350,6 @@ class HyperliquidAPI:
             sl_price = self.round_to_tick_size(stop_loss_price, tick)
             sl_side = not is_long
             
-            print(f"  📍 Установка SL {symbol}: price={sl_price}, size={size}")
-            
             res = self.exchange.order(
                 symbol,
                 sl_side,
@@ -497,31 +365,14 @@ class HyperliquidAPI:
                 reduce_only=True,
             )
             
-            if res and res.get("status") == "ok":
-                print("  ✅ SL установлен")
-            else:
-                print(f"  ❌ Ошибка SL: {res}")
-            
             return res
         
-        except Exception as e:
-            print(f"❌ Ошибка set_sl_only: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
             return None
 
     def set_tp_only(self, symbol, take_profit_price, tp_size):
-        """
-        Устанавливает только TP ордер для позиции.
-        Не удаляет существующие ордера - используется для точечной установки.
-        
-        Args:
-            symbol: Символ торговой пары (например, 'ETH')
-            take_profit_price: Цена срабатывания TP
-            tp_size: Размер ордера в единицах базовой валюты
-        """
+        """Устанавливает только TP ордер"""
         if not SDK_AVAILABLE or not self.exchange:
-            print("❌ SDK не инициализирован")
             return None
         
         try:
@@ -529,7 +380,6 @@ class HyperliquidAPI:
             position = next((p for p in positions if p["symbol"] == symbol), None)
             
             if not position:
-                print(f"  ⚠️ Позиция {symbol} не найдена")
                 return None
             
             is_long = position["side"] == "long"
@@ -548,8 +398,6 @@ class HyperliquidAPI:
             tp_size_rounded = round(tp_size, sz_dec)
             tp_side = not is_long
             
-            print(f"  📍 Установка TP {symbol}: price={tp_price}, size={tp_size_rounded}")
-            
             res = self.exchange.order(
                 symbol,
                 tp_side,
@@ -565,30 +413,20 @@ class HyperliquidAPI:
                 reduce_only=True,
             )
             
-            if res and res.get("status") == "ok":
-                print("  ✅ TP установлен")
-            else:
-                print(f"  ❌ Ошибка TP: {res}")
-            
             return res
         
-        except Exception as e:
-            print(f"❌ Ошибка set_tp_only: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
             return None
 
     def close_position(self, symbol):
-        """Закрывает позицию по символу"""
+        """Закрывает позицию"""
         positions = self.get_open_positions()
         for p in positions:
             if p["symbol"] == symbol:
                 side = "sell" if p["side"] == "long" else "buy"
                 return self.place_order(symbol, side, abs(p["size"]))
         
-        print(f"⚠️ Позиция по {symbol} не найдена")
         return None
 
 
-# Создаём глобальный экземпляр API
 hl_api = HyperliquidAPI()
