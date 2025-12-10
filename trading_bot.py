@@ -1,5 +1,6 @@
 import time
 import sqlite3
+from datetime import datetime
 from config import *
 from utils import get_market_data, analyze_with_ai, calculate_atr
 from hyperliquid_api import hl_api
@@ -120,9 +121,13 @@ def sync_positions_with_exchange():
 
 # ---------- Отчёт по позициям ----------
 def display_positions_summary():
+    # Получаем текущее время
+    now = datetime.now()
+    timestamp = now.strftime("%H:%M %d.%m.%Y")
+    
     if TEST_MODE:
         print("\n" + "=" * 60)
-        print("📊 ОТКРЫТЫЕ ПОЗИЦИИ (ТЕСТ)")
+        print(f"📊 ОТКРЫТЫЕ ПОЗИЦИИ (ТЕСТ) на {timestamp}")
         print("=" * 60)
         conn = sqlite3.connect("positions.db")
         rows = conn.execute(
@@ -141,7 +146,7 @@ def display_positions_summary():
     sync_positions_with_exchange()
     
     print("\n" + "=" * 60)
-    print("📊 ОТКРЫТЫЕ ПОЗИЦИИ")
+    print(f"📊 ОТКРЫТЫЕ ПОЗИЦИИ на {timestamp}")
     print("=" * 60)
     
     positions = hl_api.get_open_positions()
