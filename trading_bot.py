@@ -183,20 +183,69 @@ def sync_positions_with_exchange():
             "SELECT id, symbol, side, quantity, last_known_size FROM positions WHERE status='open'"
         ).fetchall()
         
-        # Проверяем закрытые позиции и логируем SL
+        # Проверяем закрытые позиции и логируем SL/TP
         for pos_id, sym_db, side, qty, last_size in local_positions:
             hl_sym = sym_db.replace("USDT", "")
             if hl_sym not in ex_pos_dict:
                 direction = "long" if side == "buy" else "short"
                 
-                # Фикс ложных SL: считаем SL только при наличии активных SL-триггеров
+                # Получаем данные позиции из БД для проверки
+                pos_data = cur.execute(
+                    """
+                    SELECT original_quantity, tp1_hit, close_reason FROM positions WHERE id=?
+                    """,
+                    (pos_id,),
+                ).fetchone()
+                orig_qty = pos_data[0] if pos_data else qty
+                was_tp1_hit = pos_data[1] if pos_data else 0
+                
+                # Определяем причину закрытия: проверяем TP и SL ордера
+                tp_triggers = [
+                    o for o in ex_orders if o["symbol"] == hl_sym and o.get("tpsl") == "tp"
+                ]
                 sl_triggers = [
                     o for o in ex_orders if o["symbol"] == hl_sym and o.get("tpsl") == "sl"
                 ]
-                if sl_triggers:
+                
+                # Проверяем историю событий для более точного определения
+                recent_tp = conn.execute(
+                    """
+                    SELECT event_time FROM trade_events
+                    WHERE symbol = ? AND event_type = 'tp' AND side = ?
+                    ORDER BY event_time DESC LIMIT 1
+                    """,
+                    (sym_db, direction),
+                ).fetchone()
+                
+                # Если был недавний TP (в последние 5 минут) и нет SL-триггеров - считаем TP
+                # Также проверяем: если позиция была частично закрыта (был TP1), то полное закрытие может быть TP
+                if recent_tp:
+                    tp_time = datetime.fromisoformat(recent_tp[0])
+                    if (datetime.now() - tp_time).total_seconds() < 300:
+                        if sl_triggers:
+                            # Есть SL-триггеры - значит закрылось по SL
+                            close_reason = "sl"
+                            log_trade_event(sym_db, "sl", direction, "Position closed by SL")
+                            print(f"🔴 {sym_db}: SL сработал для {direction}")
+                        else:
+                            # Недавний TP и нет SL - значит закрылось по TP
+                            close_reason = "tp"
+                            print(f"🟢 {sym_db}: Позиция закрыта по TP для {direction}")
+                    elif sl_triggers:
+                        close_reason = "sl"
+                        log_trade_event(sym_db, "sl", direction, "Position closed by SL")
+                        print(f"🔴 {sym_db}: SL сработал для {direction}")
+                    else:
+                        close_reason = "manual"
+                elif sl_triggers:
+                    # Есть активные SL-триггеры - значит закрылось по SL
                     close_reason = "sl"
                     log_trade_event(sym_db, "sl", direction, "Position closed by SL")
                     print(f"🔴 {sym_db}: SL сработал для {direction}")
+                elif was_tp1_hit:
+                    # Позиция была частично закрыта по TP, теперь закрылась полностью - вероятно TP
+                    close_reason = "tp"
+                    print(f"🟢 {sym_db}: Позиция закрыта по TP для {direction}")
                 else:
                     close_reason = "manual"
                 
@@ -512,6 +561,7 @@ def place_order(symbol, side, quantity, atr):
     if res:
         print("✅ Ордер исполнен")
         merge_positions(symbol, side, quantity, price, atr)
+        # После добора TP/SL будут пересозданы в следующем цикле check_positions()
 
 
 # ---------- ГЛАВНАЯ ФУНКЦИЯ: Управление TP/SL ----------
@@ -615,6 +665,9 @@ def check_positions():
                 )
                 conn.commit()
                 orig_qty = new_orig
+                # После добора нужно пересоздать TP/SL на новый размер
+                needs_sl_update = True
+                needs_tp_update = True
             
             # Обновляем last_known_size
             if abs(current_size - (last_known_size or 0)) > 0.01:
@@ -700,15 +753,19 @@ def check_positions():
                         print(f"    ⚠️ Некорректный размер TP1 ({tp_size:.4f} != {expected_tp_size:.4f})")
                         needs_tp_update = True
             
-            # Проверка срабатывания TP1
-            if remaining_pct <= 75 and not tp1_hit:
-                print(f"    ✅ TP1 сработал ({remaining_pct:.1f}% осталось)")
-                log_trade_event(sym_db, "tp", direction, f"TP1 triggered, {remaining_pct:.1f}% remaining")
-                cur.execute("UPDATE positions SET tp1_hit=1 WHERE id=?", (pos_id,))
-                conn.commit()
-                tp1_hit = 1
-                needs_sl_update = True
-                needs_tp_update = True
+            # Проверка срабатывания TP1: проверяем уменьшение размера позиции
+            # Важно: не срабатывает, если позиция закрылась по SL (проверяем наличие SL ордеров)
+            if not tp1_hit and remaining_pct <= 75:
+                # Если есть SL ордер на весь размер - значит это не TP, а возможно SL
+                # Но если размер уменьшился и нет активных SL - значит это TP
+                if len(sl_orders) == 0 or (sl_orders and sl_orders[0]["size"] < current_size * 0.95):
+                    print(f"    ✅ TP1 сработал ({remaining_pct:.1f}% осталось)")
+                    log_trade_event(sym_db, "tp", direction, f"TP1 triggered, {remaining_pct:.1f}% remaining")
+                    cur.execute("UPDATE positions SET tp1_hit=1 WHERE id=?", (pos_id,))
+                    conn.commit()
+                    tp1_hit = 1
+                    needs_sl_update = True
+                    needs_tp_update = True
             
             # Проверка срабатывания TP2 (каскадное, по доле из config)
             if tp1_hit:
