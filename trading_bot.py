@@ -663,6 +663,27 @@ def check_positions():
                 tp_price = tp_order.get("trigger_price") or tp_order.get("limit_price")
                 tp_size = tp_order["size"]
                 
+                # Проверка корректности цены/объёма TP в соответствии со стратегией
+                if tp1_hit:
+                    # ожидаемый TP2 = TP1 + n*TP2
+                    tp_offset = TAKE_PROFIT_1_PERCENT + TAKE_PROFIT_2_PERCENT * (tp2_count + 1)
+                    expected_price = (
+                        entry_price * (1 + tp_offset / 100)
+                        if direction == "long"
+                        else entry_price * (1 - tp_offset / 100)
+                    )
+                    expected_size = current_size * (TAKE_PROFIT_2_SIZE_PERCENT / 100)
+                    if tp_price and abs(tp_price - expected_price) > expected_price * 0.01:
+                        print(
+                            f"    ⚠️ TP2 цена некорректна (${tp_price:.2f} != ${expected_price:.2f})"
+                        )
+                        needs_tp_update = True
+                    if abs(tp_size - expected_size) > expected_size * 0.05:
+                        print(
+                            f"    ⚠️ TP2 размер некорректен ({tp_size:.4f} != {expected_size:.4f})"
+                        )
+                        needs_tp_update = True
+
                 # ✅ ИСПРАВЛЕНИЕ: Проверяем направление TP относительно позиции
                 if direction == "long":  # LONG: TP должен быть выше entry
                     if tp_price and tp_price < entry_price:
@@ -777,11 +798,12 @@ def check_positions():
                             print(f"    ❌ Ошибка создания TP1: {error}")
                 
                 elif tp1_hit and remaining_pct > 5:
-                    # Каскад TP2: всегда ставим следующий уровень на остаток
+                    # Каскад TP2: уровни идут после TP1, т.е. TP1 + n*TP2
+                    tp_offset = TAKE_PROFIT_1_PERCENT + TAKE_PROFIT_2_PERCENT * (tp2_count + 1)
                     if direction == "long":
-                        tp2_price = entry_price * (1 + (TAKE_PROFIT_2_PERCENT * (tp2_count + 1)) / 100)
+                        tp2_price = entry_price * (1 + tp_offset / 100)
                     else:  # short
-                        tp2_price = entry_price * (1 - (TAKE_PROFIT_2_PERCENT * (tp2_count + 1)) / 100)
+                        tp2_price = entry_price * (1 - tp_offset / 100)
                     
                     tp2_size = current_size * (TAKE_PROFIT_2_SIZE_PERCENT / 100)
                     result = hl_api.set_tp_only(sym, tp2_price, tp2_size)
