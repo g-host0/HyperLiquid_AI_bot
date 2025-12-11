@@ -3,14 +3,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-HYPERLIQUID_API_KEY = os.getenv("HYPERLIQUID_API_KEY")
 HYPERLIQUID_PRIVATE_KEY = os.getenv("HYPERLIQUID_PRIVATE_KEY")
 HYPERLIQUID_ACCOUNT_ADDRESS = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # Настройки бота
-SYMBOLS = ["ETHUSDT", "BTCUSDT", "BNBUSDT", "SOLUSDT", "MONUSDT"]
+SYMBOLS = ["ETHUSDT", "BTCUSDT", "BNBUSDT", "SOLUSDT"]
 MAX_SYMBOLS = 5
 POSITION_SIZE_PERCENT = 100.0 # Размер открытия позиции в % от депозита
 MAX_TOTAL_POSITION_PERCENT = 400.0 # Максимальная суммарная позиция в % от депозита по одному символу
@@ -25,9 +24,15 @@ USE_HYPERLIQUID = True # Использовать HyperLiquid как источ�
 # Настройки риска
 TAKE_PROFIT_1_PERCENT = 1.0 # TP1 тейк, после него ставится SL в б/у
 TAKE_PROFIT_1_SIZE_PERCENT = 30.0 # Размер позиции для TP1
-TAKE_PROFIT_2_PERCENT = 3.0 # TP2 и последующие
+TAKE_PROFIT_2_PERCENT = 1.0 # TP2 и последующие
 TAKE_PROFIT_2_SIZE_PERCENT = 20.0 # Размер позиции для TP2
 ATR_MULTIPLIER = 1.5 # Мультипликатор ATR 1h свечей для начального SL
+
+# 🆕 Настройки запретов на добор и переоткрытие позиций
+ENABLE_NO_ADD_AFTER_TP = True  # Включить запрет добора после TP
+NO_ADD_AFTER_TP_MINUTES = 30   # Время запрета добора после любого TP (минуты)
+ENABLE_NO_REOPEN_AFTER_SL = True  # Включить запрет переоткрытия в том же направлении после SL
+NO_REOPEN_AFTER_SL_MINUTES = 90   # Время запрета переоткрытия в том же направлении после SL (минуты)
 
 # AI настройки
 USE_PERPLEXITY = False # Использовать Perplexity AI
@@ -69,3 +74,5 @@ USE_TESTNET = True # True = testnet, False = mainnet
 HYPERLIQUID_MAINNET_API = "https://api.hyperliquid.xyz"
 HYPERLIQUID_TESTNET_API = "https://api.hyperliquid-testnet.xyz"
 HYPERLIQUID_API_URL = HYPERLIQUID_TESTNET_API if USE_TESTNET else HYPERLIQUID_MAINNET_API
+# Максимальный слиппедж для эмуляции рыночного ордера (в % от mid)
+MARKET_SLIPPAGE_PERCENT = 0.3
