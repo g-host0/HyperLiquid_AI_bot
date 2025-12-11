@@ -341,6 +341,24 @@ def display_positions_summary():
     if not positions:
         print("  Нет открытых позиций")
     else:
+        # Получаем original_quantity из БД для правильного расчёта процента TP
+        with sqlite3.connect("positions.db") as conn:
+            orig_qty_map = {}
+            for p in positions:
+                sym = p["symbol"]
+                sym_db = sym + "USDT"
+                side_db = "buy" if p["side"] == "long" else "sell"
+                row = conn.execute(
+                    """
+                    SELECT original_quantity FROM positions
+                    WHERE symbol=? AND side=? AND status='open'
+                    ORDER BY opened_at DESC LIMIT 1
+                    """,
+                    (sym_db, side_db),
+                ).fetchone()
+                if row:
+                    orig_qty_map[sym] = row[0]
+        
         for p in positions:
             sym = p["symbol"]
             side = p["side"].upper()
@@ -350,6 +368,9 @@ def display_positions_summary():
             
             bal = get_balance()
             pos_pct = (position_value / bal * 100) if bal > 0 else 0
+            
+            # Получаем original_quantity для правильного расчёта процента TP
+            orig_qty = orig_qty_map.get(sym, size)
             
             cur = hl_api.get_mid_price(sym)
             if cur:
@@ -380,15 +401,19 @@ def display_positions_summary():
                     tpsl = o.get("tpsl")
                     if tpsl == "tp":
                         t = "TP"
+                        # Процент TP считаем от original_quantity, а не от текущего размера
+                        pct = (o["size"] / orig_qty * 100) if orig_qty > 0 else 0
                     elif tpsl == "sl":
                         t = "SL"
+                        # Процент SL считаем от текущего размера (всегда 100% или близко)
+                        pct = (o["size"] / size * 100) if size > 0 else 0
                     else:
                         t = "TRIG"
+                        pct = (o["size"] / size * 100) if size > 0 else 0
                     
                     sz = o["size"]
                     trig_px = o.get("trigger_price")
                     limit_px = o.get("limit_price")
-                    pct = (sz / size * 100) if size > 0 else 0
                     price_display = trig_px if trig_px else limit_px
                     
                     if price_display:
@@ -460,7 +485,11 @@ def calculate_position_size(symbol, data_dict_outer):
         return 0.0, 0.0
     
     avail = max_val - total_existing
-    pos_val = min(avail, bal * (POSITION_SIZE_PERCENT / 100.0))
+    
+    # И при открытии новой позиции, и при доборе используем лимит POSITION_SIZE_PERCENT (100% баланса)
+    # но не более доступного места до общего лимита MAX_TOTAL_POSITION_PERCENT (400%)
+    max_single_order = bal * (POSITION_SIZE_PERCENT / 100.0)
+    pos_val = min(avail, max_single_order)
     
     if pos_val > bal:
         print(f"⚠️ {symbol}: Размер позиции ограничен балансом (${pos_val:.0f} -> ${bal:.0f})")

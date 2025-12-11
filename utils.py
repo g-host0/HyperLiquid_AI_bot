@@ -13,6 +13,10 @@ from config import (
     OPENROUTER_API_KEY,
     OPENROUTER_MODEL,
     OPENROUTER_BASE_URL,
+    OPENROUTER_ENABLE_CACHE_CONTROL,
+    ENABLE_TWO_LEVEL_VERIFICATION,
+    OPENROUTER_MODEL_LEVEL1,
+    OPENROUTER_MODEL_LEVEL2,
     USE_PERPLEXITY,
     USE_OPENROUTER,
     SIGNAL_STRATEGY,
@@ -23,6 +27,8 @@ from config import (
     INTERVAL,
     USE_HYPERLIQUID,
     AI_PROMPT_TEMPLATE,
+    AI_SYSTEM_PROMPT,
+    AI_USER_DATA_TEMPLATE,
 )
 
 
@@ -283,8 +289,48 @@ def analyze_with_perplexity(data_dict_outer):
 
 
 # ---------- OpenRouter (DeepSeek) ----------
+def call_openrouter_model(model_name, user_data, api_name="OpenRouter"):
+    """Вспомогательная функция для вызова OpenRouter с указанной моделью"""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return None, f"❌ OpenRouter API ключ не найден"
+
+    url = f"{OPENROUTER_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    
+    # Разделяем системный промпт (кэшируется) и пользовательские данные
+    system_message = {
+        "role": "system",
+        "content": AI_SYSTEM_PROMPT
+    }
+    
+    # Добавляем cache_control для явного кэширования (если включено в настройках)
+    if OPENROUTER_ENABLE_CACHE_CONTROL:
+        system_message["cache_control"] = {"type": "ephemeral"}
+    
+    messages = [
+        system_message,
+        {
+            "role": "user",
+            "content": user_data
+        }
+    ]
+    
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "max_tokens": 150,
+        "temperature": 0.3,
+    }
+    
+    return call_ai_api(url, headers, payload, api_name)
+
+
 def analyze_with_openrouter(data_dict_outer):
-    """Анализ через OpenRouter (DeepSeek)"""
+    """Анализ через OpenRouter (DeepSeek) с двухуровневой верификацией"""
     if not data_dict_outer or not any(
         any(tf_data for tf, tf_data in sym_data.items())
         for sym_data in data_dict_outer.values()
@@ -292,30 +338,73 @@ def analyze_with_openrouter(data_dict_outer):
         return ("hold", "Нет данных")
 
     compressed_data = compress_market_data(data_dict_outer)
-    prompt = AI_PROMPT_TEMPLATE.format(market_data=compressed_data)
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        return ("hold", "❌ OpenRouter API ключ не найден")
-
-    url = f"{OPENROUTER_BASE_URL}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": OPENROUTER_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 150,
-        "temperature": 0.3,
-    }
-    action_line, reason_line = call_ai_api(url, headers, payload, "OpenRouter")
+    user_data = AI_USER_DATA_TEMPLATE.format(market_data=compressed_data)
+    
+    # Первый уровень - первичный анализ
+    print(f"🔍 Уровень 1 ({OPENROUTER_MODEL_LEVEL1}): первичный анализ...")
+    action_line, reason_line = call_openrouter_model(
+        OPENROUTER_MODEL_LEVEL1, 
+        user_data, 
+        f"OpenRouter Level1 ({OPENROUTER_MODEL_LEVEL1})"
+    )
+    
     if not action_line:
         return ("hold", reason_line)
-
-    if action_line.startswith("buy") or action_line.startswith("sell"):
-        symbol = action_line.split("_", 1)[1].upper()
-        if symbol in data_dict_outer:
-            return (action_line, reason_line)
+    
+    print(f"   Результат: {action_line} | {reason_line}")
+    
+    # Проверяем, нужна ли верификация второго уровня
+    needs_verification = (
+        ENABLE_TWO_LEVEL_VERIFICATION and 
+        (action_line.startswith("buy") or action_line.startswith("sell"))
+    )
+    
+    if not needs_verification:
+        # Если верификация отключена или сигнал "hold" - возвращаем результат первого уровня
+        if action_line.startswith("buy") or action_line.startswith("sell"):
+            symbol = action_line.split("_", 1)[1].upper()
+            if symbol in data_dict_outer:
+                return (action_line, reason_line)
+        return ("hold", reason_line)
+    
+    # Второй уровень - подтверждение сигнала
+    print(f"✅ Уровень 2 ({OPENROUTER_MODEL_LEVEL2}): подтверждение сигнала...")
+    action_line2, reason_line2 = call_openrouter_model(
+        OPENROUTER_MODEL_LEVEL2,
+        user_data,
+        f"OpenRouter Level2 ({OPENROUTER_MODEL_LEVEL2})"
+    )
+    
+    if not action_line2:
+        print(f"   ⚠️ Ошибка подтверждения, сигнал отклонен (безопасность)")
+        return ("hold", f"Ошибка подтверждения: {reason_line2}")
+    
+    print(f"   Результат: {action_line2} | {reason_line2}")
+    
+    # Проверяем согласованность сигналов
+    if action_line2.startswith("buy") or action_line2.startswith("sell"):
+        symbol2 = action_line2.split("_", 1)[1].upper()
+        
+        # Проверяем, что оба уровня дали одинаковый сигнал (buy/sell для одного символа)
+        if (action_line.startswith("buy") and action_line2.startswith("buy") and 
+            action_line.split("_", 1)[1].upper() == symbol2):
+            print(f"   ✅ Подтверждено: BUY {symbol2}")
+            if symbol2 in data_dict_outer:
+                return (action_line2, f"Подтверждено: {reason_line2}")
+        elif (action_line.startswith("sell") and action_line2.startswith("sell") and 
+              action_line.split("_", 1)[1].upper() == symbol2):
+            print(f"   ✅ Подтверждено: SELL {symbol2}")
+            if symbol2 in data_dict_outer:
+                return (action_line2, f"Подтверждено: {reason_line2}")
+        else:
+            # Сигналы не совпали
+            print(f"   ❌ Сигналы не совпали: Level1={action_line}, Level2={action_line2}")
+            return ("hold", f"Сигналы не совпали: {action_line} vs {action_line2}")
+    else:
+        # Второй уровень дал "hold" - отклоняем сигнал
+        print(f"   ❌ Подтверждение отклонено: Level2 дал 'hold'")
+        return ("hold", f"Подтверждение отклонено: {reason_line2}")
+    
     return ("hold", reason_line)
 
 

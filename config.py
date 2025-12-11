@@ -16,7 +16,7 @@ MAX_TOTAL_POSITION_PERCENT = 400.0 # Максимальная суммарная
 LIMIT_1D = 360 # год дневных данных
 LIMIT_1H = 168 # 1 неделя часовых данных (24*7)
 LIMIT_1M = 1440 # 1 день минутных данных (24*60)
-INTERVAL = 60 # Секунд между прогонками
+INTERVAL = 180 # Секунд между прогонками
 TEST_MODE = False # Симуляция
 TEST_BALANCE = 1000.0
 USE_HYPERLIQUID = True # Использовать HyperLiquid как источник данных
@@ -41,6 +41,15 @@ PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
 OPENROUTER_MODEL = "deepseek/deepseek-chat"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Включить явное кэширование системного промпта через cache_control
+# Полезно для моделей Anthropic Claude, для других моделей OpenRouter кэширует автоматически
+OPENROUTER_ENABLE_CACHE_CONTROL = False
+# Двухуровневая верификация сигналов через OpenRouter
+# True - включить двухуровневую проверку (первый уровень + подтверждение)
+# False - использовать только первый уровень
+ENABLE_TWO_LEVEL_VERIFICATION = True
+OPENROUTER_MODEL_LEVEL1 = "deepseek/deepseek-chat"  # Первый уровень - первичный анализ
+OPENROUTER_MODEL_LEVEL2 = "deepseek/deepseek-chat-v3-0324"  # Второй уровень - подтверждение
 # Стратегия объединения сигналов при использовании обоих AI
 # "unanimous" - оба AI должны дать одинаковый сигнал
 # "priority_perplexity" - приоритет Perplexity, OpenRouter для подтверждения
@@ -49,9 +58,8 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 SIGNAL_STRATEGY = "any"
 
 # Промпт для AI (универсальный для всех сетей)
-AI_PROMPT_TEMPLATE = """Ты профессиональный криптотрейдер. Проанализируй крипторынки и дай торговый сигнал. Данные:
-
-{market_data}
+# Системный промпт (кэшируется) - содержит инструкции, которые не меняются
+AI_SYSTEM_PROMPT = """Ты профессиональный криптотрейдер. Проанализируй данные и дай торговый сигнал.
 
 ### Анализ:
 1. ПЕРВИЧНЫЙ ОСМОТР: Оцени по каждому символу на трех таймфреймах (1d, 1h, 1m) цены и объёмы. Ищи аномальные всплески объема.
@@ -68,6 +76,14 @@ AI_PROMPT_TEMPLATE = """Ты профессиональный криптотре
 ### Формат ответа:
 Action: buy_ETHUSDT | sell_BTCUSDT | hold
 Reason: [Очень краткое обоснование на русском, не более 20 слов, фокус на ключевом факторе]"""
+
+# Шаблон для пользовательских данных (меняется каждый запрос)
+AI_USER_DATA_TEMPLATE = """Данные рынка:
+
+{market_data}"""
+
+# Старый шаблон для обратной совместимости (если используется где-то еще)
+AI_PROMPT_TEMPLATE = AI_SYSTEM_PROMPT + "\n\n" + AI_USER_DATA_TEMPLATE
 
 # Hyperliquid настройки
 USE_TESTNET = True # True = testnet, False = mainnet
