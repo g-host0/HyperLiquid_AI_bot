@@ -611,8 +611,9 @@ class HyperliquidAPI:
             sz_decimals = market.get("szDecimals", 4)
             tick_sz = market.get("tickSz", 0.1)
             
-            # Точное округление trigger price
-            trigger_px = self.normalize_price(stop_loss_price, tick_sz)
+            # ✅ КРИТИЧНО: Используем round_to_tick_size вместо normalize_price
+            # normalize_price ограничивает значащие цифры до 5, что искажает цену (например, $136.79 → $100.00)
+            trigger_px = self.round_to_tick_size(stop_loss_price, tick_sz)
             
             # ✅ КРИТИЧНО: Проверяем направление триггера относительно ТЕКУЩЕЙ цены
             if is_long:
@@ -635,10 +636,14 @@ class HyperliquidAPI:
             # Определяем is_buy для закрытия позиции
             is_buy = not is_long
             
-            # Для SL используем limitPx = triggerPx (market-style), чтобы избежать валидации цены
-            limit_px = self.normalize_price(trigger_px, tick_sz)
+            # ✅ КРИТИЧНО: Для market-style trigger ордеров limitPx должен быть равен triggerPx
+            # Используем round_to_tick_size для сохранения правильной цены
+            limit_px = self.round_to_tick_size(trigger_px, tick_sz)
             
-            print(f"    📝 SL: current={current_price:.2f}, entry={entry_price:.2f}, trigger={trigger_px}, limit={limit_px}, is_buy={is_buy}")
+            # Проверка: limit_px должен быть близок к trigger_px
+            if abs(limit_px - trigger_px) > 0.01:
+                print(f"    ⚠️ ВНИМАНИЕ: limit_px ({limit_px:.4f}) отличается от trigger_px ({trigger_px:.4f})")
+                limit_px = trigger_px  # Используем trigger_px напрямую если округление создало разницу
             
             order_result = self.exchange.order(
                 symbol,
@@ -655,7 +660,6 @@ class HyperliquidAPI:
                 reduce_only=True,
             )
             
-            print(f"    📋 Ответ биржи: {order_result}")
             return order_result
             
         except Exception as e:
@@ -694,8 +698,9 @@ class HyperliquidAPI:
             sz_decimals = market.get("szDecimals", 4)
             tick_sz = market.get("tickSz", 0.1)
             
-            # Точное округление trigger price
-            trigger_px = self.normalize_price(take_profit_price, tick_sz)
+            # ✅ КРИТИЧНО: Используем round_to_tick_size вместо normalize_price
+            # normalize_price ограничивает значащие цифры до 5, что искажает цену
+            trigger_px = self.round_to_tick_size(take_profit_price, tick_sz)
             
             tp_size_rounded = round(tp_size, sz_decimals)
             
@@ -720,8 +725,14 @@ class HyperliquidAPI:
             # Определяем is_buy для закрытия позиции
             is_buy = not is_long
             
-            # Для TP ставим limitPx = triggerPx (market-style), чтобы пройти валидацию цены
-            limit_px = self.normalize_price(trigger_px, tick_sz)
+            # ✅ КРИТИЧНО: Для market-style trigger ордеров limitPx должен быть равен triggerPx
+            # Используем round_to_tick_size для сохранения правильной цены
+            limit_px = self.round_to_tick_size(trigger_px, tick_sz)
+            
+            # Проверка: limit_px должен быть близок к trigger_px
+            if abs(limit_px - trigger_px) > 0.01:
+                print(f"    ⚠️ ВНИМАНИЕ: limit_px ({limit_px:.4f}) отличается от trigger_px ({trigger_px:.4f})")
+                limit_px = trigger_px  # Используем trigger_px напрямую если округление создало разницу
             
             print(f"    📝 TP: current={current_price:.2f}, entry={entry_price:.2f}, trigger={trigger_px}, limit={limit_px}, is_buy={is_buy}")
             
@@ -740,7 +751,6 @@ class HyperliquidAPI:
                 reduce_only=True,
             )
             
-            print(f"    📋 Ответ биржи: {order_result}")
             return order_result
             
         except Exception as e:
