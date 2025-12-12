@@ -39,7 +39,7 @@ USE_PERPLEXITY = False # Использовать Perplexity AI
 USE_OPENROUTER = True # Использовать OpenRouter (DeepSeek)
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
-OPENROUTER_MODEL = "deepseek/deepseek-chat"
+OPENROUTER_MODEL = "deepseek/deepseek-v3.2"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Включить явное кэширование системного промпта через cache_control
 # Полезно для моделей Anthropic Claude, для других моделей OpenRouter кэширует автоматически
@@ -47,9 +47,9 @@ OPENROUTER_ENABLE_CACHE_CONTROL = False
 # Двухуровневая верификация сигналов через OpenRouter
 # True - включить двухуровневую проверку (первый уровень + подтверждение)
 # False - использовать только первый уровень
-ENABLE_TWO_LEVEL_VERIFICATION = True
-OPENROUTER_MODEL_LEVEL1 = "deepseek/deepseek-chat"  # Первый уровень - первичный анализ
-OPENROUTER_MODEL_LEVEL2 = "deepseek/deepseek-chat-v3-0324"  # Второй уровень - подтверждение
+ENABLE_TWO_LEVEL_VERIFICATION = False
+OPENROUTER_MODEL_LEVEL1 = "deepseek/deepseek-v3.2-exp"  # Первый уровень - первичный анализ
+OPENROUTER_MODEL_LEVEL2 = "deepseek/deepseek-v3.2"  # Второй уровень - подтверждение
 # Стратегия объединения сигналов при использовании обоих AI
 # "unanimous" - оба AI должны дать одинаковый сигнал
 # "priority_perplexity" - приоритет Perplexity, OpenRouter для подтверждения

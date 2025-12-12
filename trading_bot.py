@@ -407,6 +407,9 @@ def display_positions_summary():
                         t = "SL"
                         # Процент SL считаем от текущего размера (всегда 100% или близко)
                         pct = (o["size"] / size * 100) if size > 0 else 0
+                        # Предупреждение, если объём SL значительно отличается от позиции
+                        if pct > 105 or pct < 95:
+                            t = "SL ⚠️"  # Маркер некорректного объёма
                     else:
                         t = "TRIG"
                         pct = (o["size"] / size * 100) if size > 0 else 0
@@ -587,10 +590,34 @@ def place_order(symbol, side, quantity, atr):
     print(f"📤 {side.upper()} {quantity:.6f} {hl_sym}")
     
     res = hl_api.place_order(hl_sym, side, quantity, "Market")
-    if res:
-        print("✅ Ордер исполнен")
-        merge_positions(symbol, side, quantity, price, atr)
-        # После добора TP/SL будут пересозданы в следующем цикле check_positions()
+    
+    # Проверяем, что ордер действительно исполнен
+    if res and res.get("status") == "ok":
+        print(f"📋 Ответ API: {res}")  # Логирование для отладки
+        statuses = res.get("response", {}).get("data", {}).get("statuses", [])
+        if statuses:
+            order_status = statuses[0]
+            # Для market ордеров с IOC ожидаем "filled" (исполнен)
+            if "filled" in order_status:
+                filled_data = order_status.get("filled", {})
+                filled_size = filled_data.get("totalSz", "0")
+                avg_price = filled_data.get("avgPx", "0")
+                print(f"✅ Ордер исполнен: {filled_size} @ ${avg_price}")
+                merge_positions(symbol, side, quantity, price, atr)
+                # После добора TP/SL будут пересозданы в следующем цикле check_positions()
+            elif "resting" in order_status:
+                print("⚠️ Ордер размещен, но не исполнен (ожидает исполнения)")
+            elif "error" in order_status:
+                error_msg = order_status.get("error", "Неизвестная ошибка")
+                print(f"❌ Ошибка ордера: {error_msg}")
+            else:
+                print(f"⚠️ Неожиданный статус ордера: {order_status}")
+        else:
+            print("⚠️ Нет информации о статусе ордера в ответе")
+    elif res:
+        print(f"⚠️ Ордер не принят: {res}")
+    else:
+        print("❌ Не удалось отправить ордер (res = None)")
 
 
 # ---------- ГЛАВНАЯ ФУНКЦИЯ: Управление TP/SL ----------
@@ -641,7 +668,7 @@ def check_positions():
             # Получаем данные из БД
             db_row = cur.execute(
                 """
-                SELECT id, original_quantity, atr, tp1_hit, tp2_hit, tp2_count, last_known_size
+                SELECT id, original_quantity, atr, tp1_hit, tp2_hit, tp2_count, last_known_size, entry_price
                 FROM positions
                 WHERE symbol=? AND status='open'
                 ORDER BY opened_at DESC LIMIT 1
@@ -653,8 +680,22 @@ def check_positions():
                 print(f"    ⚠️ Позиция не найдена в БД")
                 continue
             
-            pos_id, orig_qty, atr, tp1_hit, tp2_hit, tp2_count, last_known_size = db_row
-            print(f"    ℹ️ БД: orig_qty={orig_qty}, atr={atr}, tp1_hit={tp1_hit}")
+            pos_id, orig_qty, atr, tp1_hit, tp2_hit, tp2_count, last_known_size, db_entry_price = db_row
+            
+            # ✅ КРИТИЧНО: Обновляем entry_price в БД из биржи (источник истины)
+            # При доборе позиции биржа автоматически пересчитывает среднюю цену входа
+            db_entry_price_val = db_entry_price if db_entry_price is not None else 0
+            if abs(entry_price - db_entry_price_val) > 0.01:
+                db_entry_str = f"${db_entry_price:.2f}" if db_entry_price is not None else "None"
+                print(f"    🔄 Обновление entry_price: БД={db_entry_str} → Биржа=${entry_price:.2f}")
+                cur.execute(
+                    "UPDATE positions SET entry_price=?, position_value=? WHERE id=?",
+                    (entry_price, current_size * entry_price, pos_id),
+                )
+                conn.commit()
+                print(f"    ✅ entry_price обновлён в БД: ${entry_price:.2f}")
+            
+            print(f"    ℹ️ БД: orig_qty={orig_qty}, atr={atr}, tp1_hit={tp1_hit}, entry_price=${entry_price:.2f}")
             
             # Если ATR не задан, получаем из рыночных данных
             if not atr or atr == 0:
@@ -683,11 +724,16 @@ def check_positions():
                 conn.commit()
                 print(f"    ✅ original_quantity инициализирован: {orig_qty}")
             
-            # Обнаружение добора
-            if last_known_size and current_size > last_known_size * 1.05:
+            # Инициализируем флаги обновления ордеров
+            needs_sl_update = False
+            needs_tp_update = False
+            
+            # Обнаружение добора - проверяем увеличение размера позиции
+            # Используем более чувствительный порог (3% вместо 5%) для раннего обнаружения
+            if last_known_size and current_size > last_known_size * 1.03:
                 size_increase = current_size - last_known_size
                 new_orig = orig_qty + size_increase
-                print(f"    📊 Обнаружен добор +{size_increase:.4f}")
+                print(f"    📊 Обнаружен добор +{size_increase:.4f} (было {last_known_size:.4f}, стало {current_size:.4f}, увеличение {size_increase/last_known_size*100:.1f}%)")
                 cur.execute(
                     "UPDATE positions SET original_quantity=?, last_known_size=? WHERE id=?",
                     (new_orig, current_size, pos_id),
@@ -697,6 +743,7 @@ def check_positions():
                 # После добора нужно пересоздать TP/SL на новый размер
                 needs_sl_update = True
                 needs_tp_update = True
+                print(f"    ⚠️ После добора нужно пересоздать TP/SL ордера на новый размер {current_size:.4f}")
             
             # Обновляем last_known_size
             if abs(current_size - (last_known_size or 0)) > 0.01:
@@ -715,29 +762,57 @@ def check_positions():
             
             print(f"    ℹ️ Текущие ордера: SL={len(sl_orders)}, TP={len(tp_orders)}")
             
-            needs_sl_update = len(sl_orders) == 0
-            needs_tp_update = len(tp_orders) == 0
+            # Если флаги не установлены при доборе, проверяем наличие ордеров
+            if not needs_sl_update:
+                needs_sl_update = len(sl_orders) == 0
+            if not needs_tp_update:
+                needs_tp_update = len(tp_orders) == 0
             
-            # Проверка SL
+            # Если TP1 сработал и нет TP ордеров - нужно создать следующий TP2
+            if tp1_hit and len(tp_orders) == 0 and remaining_pct > 1.0:
+                print(f"    ⚠️ TP1 сработал, но нет TP ордеров - нужно создать следующий TP2 (остаток {remaining_pct:.1f}%, tp2_count={tp2_count})")
+                needs_tp_update = True
+            
+            # Проверка SL - проверяем ВСЕ SL ордера
             if sl_orders:
-                sl_order = sl_orders[0]
-                sl_size = sl_order["size"]
-                sl_price = sl_order.get("trigger_price") or sl_order.get("limit_price")
-                
-                if abs(sl_size - current_size) > current_size * 0.01:
-                    print(f"    ⚠️ Некорректный объём SL ({sl_size:.4f} != {current_size:.4f})")
-                    needs_sl_update = True
-                
-                if tp1_hit:
-                    if sl_price and abs(sl_price - entry_price) > entry_price * 0.005:
-                        print(f"    ⚠️ SL не в безубытке (${sl_price:.2f} != ${entry_price:.2f})")
+                # Проверяем каждый SL ордер на корректность
+                for sl_order in sl_orders:
+                    sl_size = sl_order["size"]
+                    sl_price = sl_order.get("trigger_price") or sl_order.get("limit_price")
+                    
+                    # Проверка объёма - строгая проверка: допуск 1% ИЛИ абсолютная разница > 0.01
+                    # SL должен быть на весь текущий размер позиции
+                    volume_diff = abs(sl_size - current_size)
+                    volume_diff_pct = (volume_diff / current_size * 100) if current_size > 0 else 0
+                    print(f"    🔍 Проверка SL: объём ордера={sl_size:.4f}, позиция={current_size:.4f}, разница={volume_diff:.4f} ({volume_diff_pct:.2f}%)")
+                    # Проверяем как процентную разницу (1%), так и абсолютную (0.01 для ETH/BTC)
+                    if volume_diff > current_size * 0.01 or volume_diff > 0.01:
+                        print(f"    ⚠️ Некорректный объём SL ({sl_size:.4f} != {current_size:.4f}, разница {volume_diff:.4f} = {volume_diff_pct:.1f}%)")
                         needs_sl_update = True
-                else:
-                    if atr and atr > 0:
-                        expected_sl = calculate_stop_loss(entry_price, side, atr)
-                        if sl_price and abs(sl_price - expected_sl) > expected_sl * 0.01:
-                            print(f"    ⚠️ Некорректная цена SL (${sl_price:.2f} != ${expected_sl:.2f})")
+                        break  # Достаточно одного некорректного ордера
+                    else:
+                        print(f"    ✅ Объём SL корректен")
+                
+                # Если объёмы корректны, проверяем цены (только для первого ордера)
+                if not needs_sl_update and sl_orders:
+                    sl_order = sl_orders[0]
+                    sl_price = sl_order.get("trigger_price") or sl_order.get("limit_price")
+                    
+                    if tp1_hit:
+                        if sl_price and abs(sl_price - entry_price) > entry_price * 0.005:
+                            print(f"    ⚠️ SL не в безубытке (${sl_price:.2f} != ${entry_price:.2f})")
                             needs_sl_update = True
+                    else:
+                        if atr and atr > 0:
+                            expected_sl = calculate_stop_loss(entry_price, side, atr)
+                            if sl_price and abs(sl_price - expected_sl) > expected_sl * 0.01:
+                                print(f"    ⚠️ Некорректная цена SL (${sl_price:.2f} != ${expected_sl:.2f})")
+                                needs_sl_update = True
+                
+                # Если найдено несколько SL ордеров, оставляем только один (самый свежий)
+                if len(sl_orders) > 1:
+                    print(f"    ⚠️ Найдено {len(sl_orders)} SL ордеров, нужно оставить один")
+                    needs_sl_update = True
             
             # Проверка TP
             if tp_orders:
@@ -747,7 +822,7 @@ def check_positions():
                 
                 # Проверка корректности цены/объёма TP в соответствии со стратегией
                 if tp1_hit:
-                    # ожидаемый TP2 = TP1 + n*TP2
+                    # ожидаемый TP2 = TP1 + n*TP2, где n = tp2_count + 1 (следующий TP2)
                     tp_offset = TAKE_PROFIT_1_PERCENT + TAKE_PROFIT_2_PERCENT * (tp2_count + 1)
                     expected_price = (
                         entry_price * (1 + tp_offset / 100)
@@ -755,16 +830,24 @@ def check_positions():
                         else entry_price * (1 - tp_offset / 100)
                     )
                     expected_size = current_size * (TAKE_PROFIT_2_SIZE_PERCENT / 100)
+                    
+                    print(f"    🔍 Проверка TP2: текущий tp2_count={tp2_count}, ожидаемый offset={tp_offset:.2f}%, цена=${expected_price:.2f}, размер={expected_size:.4f}")
+                    
                     if tp_price and abs(tp_price - expected_price) > expected_price * 0.01:
                         print(
-                            f"    ⚠️ TP2 цена некорректна (${tp_price:.2f} != ${expected_price:.2f})"
+                            f"    ⚠️ TP2 цена некорректна (${tp_price:.2f} != ${expected_price:.2f}, разница {abs(tp_price - expected_price):.2f})"
                         )
                         needs_tp_update = True
-                    if abs(tp_size - expected_size) > expected_size * 0.05:
+                    tp2_size_diff = abs(tp_size - expected_size)
+                    tp2_size_diff_pct = (tp2_size_diff / expected_size * 100) if expected_size > 0 else 0
+                    # Проверяем как процентную разницу (1%), так и абсолютную (0.01)
+                    if tp2_size_diff > expected_size * 0.01 or tp2_size_diff > 0.01:
                         print(
-                            f"    ⚠️ TP2 размер некорректен ({tp_size:.4f} != {expected_size:.4f})"
+                            f"    ⚠️ TP2 размер некорректен ({tp_size:.4f} != {expected_size:.4f}, разница {tp2_size_diff:.4f} = {tp2_size_diff_pct:.1f}%)"
                         )
                         needs_tp_update = True
+                    if not needs_tp_update:
+                        print(f"    ✅ TP2 корректен (${tp_price:.2f}, объём {tp_size:.4f})")
 
                 # ✅ ИСПРАВЛЕНИЕ: Проверяем направление TP относительно позиции
                 if direction == "long":  # LONG: TP должен быть выше entry
@@ -778,9 +861,15 @@ def check_positions():
                 
                 if not tp1_hit:
                     expected_tp_size = orig_qty * (TAKE_PROFIT_1_SIZE_PERCENT / 100)
-                    if abs(tp_size - expected_tp_size) > expected_tp_size * 0.05:
-                        print(f"    ⚠️ Некорректный размер TP1 ({tp_size:.4f} != {expected_tp_size:.4f})")
+                    tp_size_diff = abs(tp_size - expected_tp_size)
+                    tp_size_diff_pct = (tp_size_diff / expected_tp_size * 100) if expected_tp_size > 0 else 0
+                    print(f"    🔍 Проверка TP1: объём ордера={tp_size:.4f}, ожидаемый={expected_tp_size:.4f} (30% от orig_qty={orig_qty:.4f}), разница={tp_size_diff:.4f} ({tp_size_diff_pct:.2f}%)")
+                    # Проверяем как процентную разницу (1%), так и абсолютную (0.01)
+                    if tp_size_diff > expected_tp_size * 0.01 or tp_size_diff > 0.01:
+                        print(f"    ⚠️ Некорректный размер TP1 ({tp_size:.4f} != {expected_tp_size:.4f}, разница {tp_size_diff:.4f} = {tp_size_diff_pct:.1f}%)")
                         needs_tp_update = True
+                    else:
+                        print(f"    ✅ Размер TP1 корректен")
             
             # Проверка срабатывания TP1: проверяем уменьшение размера позиции
             # Важно: не срабатывает, если позиция закрылась по SL (проверяем наличие SL ордеров)
@@ -802,8 +891,9 @@ def check_positions():
                 tp2_fraction = 1 - (TAKE_PROFIT_2_SIZE_PERCENT / 100.0)  # доля остатка после каждого TP2
                 target_after_next_tp2 = base_after_tp1_pct * (tp2_fraction ** (tp2_count + 1))
                 # небольшая дельта, чтобы учесть округление объёмов
+                print(f"    🔍 Проверка TP2: tp2_count={tp2_count}, target={target_after_next_tp2:.2f}%, текущий остаток={remaining_pct:.2f}%")
                 if remaining_pct <= target_after_next_tp2 + 0.3:
-                    print(f"    ✅ TP2 сработал ({remaining_pct:.1f}% осталось)")
+                    print(f"    ✅ TP2 сработал ({remaining_pct:.1f}% осталось, цель была {target_after_next_tp2:.2f}%)")
                     log_trade_event(sym_db, "tp", direction, f"TP2 triggered, {remaining_pct:.1f}% remaining")
                     cur.execute(
                         "UPDATE positions SET tp2_hit=1, tp2_count=tp2_count+1 WHERE id=?",
@@ -814,12 +904,18 @@ def check_positions():
                     tp2_count += 1
                     needs_tp_update = True
                     needs_sl_update = True  # пересоздать SL на остаток (в б/у)
+                    print(f"    📊 TP2 счётчик обновлён: tp2_count={tp2_count}, следующий TP2 будет на уровне {TAKE_PROFIT_1_PERCENT + TAKE_PROFIT_2_PERCENT * (tp2_count + 1):.2f}%")
             
             # Удаление старых ордеров
             if needs_sl_update and sl_orders:
-                print(f"    🗑️ Удаление старых SL ордеров...")
+                sizes_str = ", ".join([f"{o['size']:.4f}" for o in sl_orders])
+                print(f"    🗑️ Удаление {len(sl_orders)} старых SL ордеров (объёмы: {sizes_str})...")
                 for sl_order in sl_orders:
-                    hl_api.cancel_order(sym, sl_order["oid"])
+                    result = hl_api.cancel_order(sym, sl_order["oid"])
+                    if result and result.get("status") == "ok":
+                        print(f"      ✅ Удалён SL ордер {sl_order['oid']} (объём {sl_order['size']:.4f})")
+                    else:
+                        print(f"      ⚠️ Не удалось удалить SL ордер {sl_order['oid']}")
                 time.sleep(0.1)
             
             if needs_tp_update and tp_orders:
@@ -862,7 +958,7 @@ def check_positions():
             
             # Создание TP
             if needs_tp_update:
-                print(f"    🔄 Создание TP...")
+                print(f"    🔄 Создание TP... (tp1_hit={tp1_hit}, tp2_count={tp2_count}, остаток={remaining_pct:.1f}%)")
                 if not tp1_hit:
                     # ✅ ИСПРАВЛЕНИЕ: TP расчёт по направлению позиции
                     if direction == "long":
@@ -883,26 +979,42 @@ def check_positions():
                             error = statuses[0].get("error", "Unknown error")
                             print(f"    ❌ Ошибка создания TP1: {error}")
                 
-                elif tp1_hit and remaining_pct > 5:
+                elif tp1_hit:
                     # Каскад TP2: уровни идут после TP1, т.е. TP1 + n*TP2
-                    tp_offset = TAKE_PROFIT_1_PERCENT + TAKE_PROFIT_2_PERCENT * (tp2_count + 1)
+                    # tp2_count - это количество уже сработавших TP2
+                    # tp2_number - это номер следующего TP2 для создания (1, 2, 3...)
+                    tp2_number = tp2_count + 1
+                    tp_offset = TAKE_PROFIT_1_PERCENT + TAKE_PROFIT_2_PERCENT * tp2_number
+                    print(f"    📊 Расчёт TP2: tp2_count={tp2_count} (сработало), tp2_number={tp2_number} (создаём), offset={tp_offset:.2f}%")
                     if direction == "long":
                         tp2_price = entry_price * (1 + tp_offset / 100)
                     else:  # short
                         tp2_price = entry_price * (1 - tp_offset / 100)
                     
                     tp2_size = current_size * (TAKE_PROFIT_2_SIZE_PERCENT / 100)
-                    result = hl_api.set_tp_only(sym, tp2_price, tp2_size)
                     
-                    if result and result.get("status") == "ok":
-                        response_data = result.get("response", {}).get("data", {})
-                        statuses = response_data.get("statuses", [])
-                        if statuses and "error" not in statuses[0]:
-                            print(f"    ✅ TP2 установлен @ ${tp2_price:.2f} ({TAKE_PROFIT_2_SIZE_PERCENT}%)")
-                            updated_count += 1
+                    print(f"    🔄 Создание TP2 #{tp2_number}: offset={tp_offset:.2f}%, цена=${tp2_price:.2f}, размер={tp2_size:.4f}, остаток={remaining_pct:.1f}%")
+                    
+                    # Проверяем, что размер позиции достаточен для создания TP2
+                    # Минимальный размер TP2 должен быть не менее 0.0001 (защита от слишком маленьких ордеров)
+                    if tp2_size < 0.0001 or current_size < 0.0001:
+                        print(f"    ⚠️ Позиция слишком мала для TP2 (размер: {current_size:.6f}, TP2: {tp2_size:.6f})")
+                    elif remaining_pct < 1.0:
+                        print(f"    ⚠️ Осталось менее 1% позиции ({remaining_pct:.2f}%), пропускаем создание TP2")
+                    else:
+                        result = hl_api.set_tp_only(sym, tp2_price, tp2_size)
+                        
+                        if result and result.get("status") == "ok":
+                            response_data = result.get("response", {}).get("data", {})
+                            statuses = response_data.get("statuses", [])
+                            if statuses and "error" not in statuses[0]:
+                                print(f"    ✅ TP2 #{tp2_number} установлен @ ${tp2_price:.2f} ({TAKE_PROFIT_2_SIZE_PERCENT}%, объём {tp2_size:.4f}, остаток {remaining_pct:.1f}%)")
+                                updated_count += 1
+                            else:
+                                error = statuses[0].get("error", "Unknown error")
+                                print(f"    ❌ Ошибка создания TP2 #{tp2_number}: {error}")
                         else:
-                            error = statuses[0].get("error", "Unknown error")
-                            print(f"    ❌ Ошибка создания TP2: {error}")
+                            print(f"    ⚠️ Не удалось создать TP2 #{tp2_number} (ответ API: {result})")
                 
                 time.sleep(0.2)
         

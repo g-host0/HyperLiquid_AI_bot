@@ -465,7 +465,7 @@ def analyze_with_ai(data_dict_outer):
         print(f" Причина: {perplexity_signal[1]}")
 
     if USE_OPENROUTER:
-        print("🤖 OpenRouter (DeepSeek) анализирует...")
+        print("🤖 OpenRouter AI анализирует...")
         openrouter_signal = analyze_with_openrouter(data_dict_outer)
         signals.append(("openrouter", openrouter_signal))
         print(f" Действие: {openrouter_signal[0]}")

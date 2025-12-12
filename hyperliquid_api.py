@@ -328,6 +328,10 @@ class HyperliquidAPI:
                             pass
                 continue
             
+            # Получаем текущий размер позиции для проверки объёмов SL
+            position = next((p for p in positions if p["symbol"] == sym), None)
+            current_size = abs(position["size"]) if position else 0
+            
             # Затем чистим дубли, оставляя самый свежий по oid
             for tpsl_type in ["sl", "tp"]:
                 orders_list = types[tpsl_type]
@@ -341,6 +345,20 @@ class HyperliquidAPI:
                                 total_deleted += 1
                         except Exception:
                             pass
+                
+                # Дополнительная проверка: удаляем SL ордера с некорректными объёмами
+                if tpsl_type == "sl" and current_size > 0:
+                    for o in orders_list:
+                        order_size = o.get("size", 0)
+                        # Если объём ордера больше чем в 2 раза превышает позицию - это явно старый ордер
+                        if order_size > current_size * 2.0:
+                            try:
+                                result = self.exchange.cancel(sym, o["oid"])
+                                if result and result.get("status") == "ok":
+                                    print(f"    🗑️ Удалён SL ордер с некорректным объёмом ({order_size:.4f} > {current_size:.4f} * 2)")
+                                    total_deleted += 1
+                            except Exception:
+                                pass
         
         if total_deleted > 0:
             print(f"✅ Очистка дублей: удалено {total_deleted}")
