@@ -461,15 +461,11 @@ def analyze_with_ai(data_dict_outer):
         print("🔮 Perplexity AI анализирует...")
         perplexity_signal = analyze_with_perplexity(data_dict_outer)
         signals.append(("perplexity", perplexity_signal))
-        print(f" Действие: {perplexity_signal[0]}")
-        print(f" Причина: {perplexity_signal[1]}")
 
     if USE_OPENROUTER:
         print("🤖 OpenRouter AI анализирует...")
         openrouter_signal = analyze_with_openrouter(data_dict_outer)
         signals.append(("openrouter", openrouter_signal))
-        print(f" Действие: {openrouter_signal[0]}")
-        print(f" Причина: {openrouter_signal[1]}")
 
     print("=" * 60 + "\n")
 

@@ -734,8 +734,6 @@ class HyperliquidAPI:
                 print(f"    ⚠️ ВНИМАНИЕ: limit_px ({limit_px:.4f}) отличается от trigger_px ({trigger_px:.4f})")
                 limit_px = trigger_px  # Используем trigger_px напрямую если округление создало разницу
             
-            print(f"    📝 TP: current={current_price:.2f}, entry={entry_price:.2f}, trigger={trigger_px}, limit={limit_px}, is_buy={is_buy}")
-            
             order_result = self.exchange.order(
                 symbol,
                 is_buy,
