@@ -223,10 +223,39 @@ class HyperliquidAPI:
         except Exception:
             return []
 
+    def get_order_status(self, oid):
+        """Получение полной информации об ордере по его oid через orderStatus endpoint"""
+        if not self.account_address or not oid:
+            return None
+        
+        try:
+            url = f"{self.api_url}/info"
+            payload = {"type": "orderStatus", "user": self.account_address, "oid": oid}
+            r = requests.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=5,
+            )
+            if r.status_code == 200:
+                response = r.json()
+                # Структура ответа: {"status": "order", "order": {"order": {...}, "status": "open"}}
+                if response.get("status") == "order":
+                    order_info = response.get("order", {})
+                    # order_info содержит {"order": {...}, "status": "open"}
+                    # Возвращаем весь order_info, чтобы можно было извлечь и order, и другие поля
+                    return order_info
+        except Exception as e:
+            # Не логируем ошибки для каждого ордера, чтобы не засорять вывод
+            pass
+        return None
+
     def get_open_orders(self):
+        """Получение открытых ордеров с биржи - получаем полную информацию для trigger ордеров"""
         if not self.account_address:
             return []
         
+        # Получаем данные через openOrders endpoint
         data = None
         if SDK_AVAILABLE and self.info:
             try:
@@ -271,9 +300,38 @@ class HyperliquidAPI:
                 else:
                     tpsl = "tp"
             
-            trigger_px = o.get("triggerPx")
+            # ✅ КРИТИЧНО: Для trigger ордеров получаем полную информацию через orderStatus
+            # openOrders не возвращает triggerPx, поэтому запрашиваем детали ордера
+            trigger_px = None
             limit_px = o.get("limitPx")
-            order_type = o.get("orderType", "Limit" if not is_reduce_only else "Stop/TP")
+            
+            if is_trigger:
+                oid = o.get("oid")
+                if oid:
+                    # Получаем полную информацию об ордере через orderStatus endpoint
+                    order_details = self.get_order_status(oid)
+                    if order_details:
+                        # Структура: {"order": {...}, "status": "open"}
+                        order_data = order_details.get("order", {})
+                        # Извлекаем triggerPx из полной информации
+                        trigger_px = order_data.get("triggerPx")
+                        # Если triggerPx не найден напрямую, проверяем orderType
+                        if trigger_px is None:
+                            order_type_obj = order_data.get("orderType")
+                            if isinstance(order_type_obj, dict):
+                                trigger_info = order_type_obj.get("trigger", {})
+                                if isinstance(trigger_info, dict):
+                                    trigger_px = trigger_info.get("triggerPx")
+            
+            # Для обычных ордеров просто извлекаем limitPx
+            if not is_trigger:
+                limit_px = o.get("limitPx")
+            
+            order_type_obj = o.get("orderType")
+            if isinstance(order_type_obj, dict):
+                order_type = "Stop/TP" if is_reduce_only else "Limit"
+            else:
+                order_type = str(order_type_obj) if order_type_obj else ("Limit" if not is_reduce_only else "Stop/TP")
             
             res.append(
                 {

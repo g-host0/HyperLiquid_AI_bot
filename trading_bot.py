@@ -417,12 +417,44 @@ def display_positions_summary():
                     sz = o["size"]
                     trig_px = o.get("trigger_price")
                     limit_px = o.get("limit_price")
-                    price_display = trig_px if trig_px else limit_px
+                    
+                    # ✅ КРИТИЧНО: Для trigger ордеров приоритет trigger_price
+                    # Если trigger_price есть - используем его (это правильная цена с биржи)
+                    # Если нет - используем limit_px, но проверяем разумность
+                    if o.get("is_trigger"):
+                        if trig_px:
+                            price_display = trig_px
+                        elif limit_px and limit_px > 0:
+                            # Проверяем разумность limit_px относительно entry
+                            # Для LONG: TP должен быть выше entry, SL ниже
+                            # Для SHORT: наоборот
+                            price_is_valid = False
+                            if side == "LONG":
+                                if tpsl == "tp":
+                                    price_is_valid = limit_px > entry * 1.001 and limit_px < entry * 3.0
+                                else:  # sl
+                                    price_is_valid = limit_px < entry * 0.999 and limit_px > entry * 0.1
+                            else:  # SHORT
+                                if tpsl == "tp":
+                                    price_is_valid = limit_px < entry * 0.999 and limit_px > entry * 0.1
+                                else:  # sl
+                                    price_is_valid = limit_px > entry * 1.001 and limit_px < entry * 3.0
+                            
+                            if price_is_valid:
+                                price_display = limit_px
+                            else:
+                                # limit_px неправильный (например, $100.00 для SOL)
+                                price_display = None
+                        else:
+                            price_display = None
+                    else:
+                        # Для обычных ордеров используем limit_px
+                        price_display = limit_px if limit_px else trig_px
                     
                     if price_display:
                         print(f"   └─ {t}: ${price_display:.2f} ({pct:.0f}%, объём {sz:.4f})")
                     else:
-                        print(f"   └─ {t}: ({pct:.0f}%, объём {sz:.4f})")
+                        print(f"   └─ {t}: ⚠️ Цена недоступна (триггер={trig_px}, лимит={limit_px}) ({pct:.0f}%, объём {sz:.4f})")
     
     print("=" * 60 + "\n")
 
@@ -444,9 +476,12 @@ def get_current_price(symbol):
 
 
 def get_symbol_atr(symbol, data_dict_outer):
+    """Получение ATR из 1h свечей для символа"""
     if symbol not in data_dict_outer or "1h" not in data_dict_outer[symbol]:
         return 0.0
-    return calculate_atr(data_dict_outer[symbol]["1h"])
+    candles_1h = data_dict_outer[symbol]["1h"]
+    atr = calculate_atr(candles_1h, period=14)
+    return atr
 
 
 # ---------- Расчёт размера позиции ----------
@@ -697,13 +732,14 @@ def check_positions():
             
             print(f"    ℹ️ БД: orig_qty={orig_qty}, atr={atr}, tp1_hit={tp1_hit}, entry_price=${entry_price:.2f}")
             
-            # Если ATR не задан, получаем из рыночных данных
+            # Если ATR не задан, получаем из рыночных данных (1h свечи)
             if not atr or atr == 0:
-                print(f"    🔄 ATR отсутствует, получаю из рынка...")
+                print(f"    🔄 ATR отсутствует, получаю из 1h свечей...")
                 try:
                     market_data = get_market_data([sym_db])
                     if sym_db in market_data and "1h" in market_data[sym_db]:
-                        atr = calculate_atr(market_data[sym_db]["1h"])
+                        candles_1h = market_data[sym_db]["1h"]
+                        atr = calculate_atr(candles_1h, period=14)
                         if atr > 0:
                             cur.execute(
                                 "UPDATE positions SET atr=? WHERE id=?",
@@ -946,7 +982,7 @@ def check_positions():
                             response_data = result.get("response", {}).get("data", {})
                             statuses = response_data.get("statuses", [])
                             if statuses and "error" not in statuses[0]:
-                                print(f"    ✅ SL установлен по ATR @ ${sl_price:.2f}")
+                                print(f"    ✅ SL установлен по ATR @ ${sl_price:.2f} (ATR={atr:.4f} × {ATR_MULTIPLIER})")
                                 updated_count += 1
                             else:
                                 error = statuses[0].get("error", "Unknown error")
