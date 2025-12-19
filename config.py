@@ -29,7 +29,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_ENABLE_CACHE_CONTROL = False
 
 # Двухуровневая верификация
-ENABLE_TWO_LEVEL_VERIFICATION = True
+ENABLE_TWO_LEVEL_VERIFICATION = False
 OPENROUTER_MODEL_LEVEL1 = "x-ai/grok-4.1-fast"
 OPENROUTER_MODEL_LEVEL2 = "deepseek/deepseek-v3.2"
 
