@@ -24,12 +24,12 @@ PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "x-ai/grok-4.1-fast"  # ✅ Обновлённая модель
+OPENROUTER_MODEL = "x-ai/grok-4.1-fast"  
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_ENABLE_CACHE_CONTROL = False
 
 # Двухуровневая верификация
-ENABLE_TWO_LEVEL_VERIFICATION = False
+ENABLE_TWO_LEVEL_VERIFICATION = True
 OPENROUTER_MODEL_LEVEL1 = "x-ai/grok-4.1-fast"
 OPENROUTER_MODEL_LEVEL2 = "deepseek/deepseek-v3.2"
 
@@ -56,7 +56,7 @@ ATR_MULTIPLIER = 1.5
 # Take Profit
 TAKE_PROFIT_1_PERCENT = 1.0
 TAKE_PROFIT_1_SIZE_PERCENT = 30.0
-TAKE_PROFIT_2_PERCENT = 2.0  # ✅ Шаг 2% для TP2
+TAKE_PROFIT_2_PERCENT = 1.0  # ✅ Шаг 2% для TP2
 TAKE_PROFIT_2_SIZE_PERCENT = 20.0
 
 # Защита от переторговки

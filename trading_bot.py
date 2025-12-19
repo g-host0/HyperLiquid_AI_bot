@@ -139,7 +139,7 @@ def can_add_to_position(symbol):
 
 
 def can_open_position_direction(symbol, side):
-    """Проверка возможности открытия позиции после SL"""
+    """✅ ИСПРАВЛЕНО: Проверка возможности открытия позиции после SL"""
     if not ENABLE_NO_REOPEN_AFTER_SL:
         return True, ""
     
@@ -169,7 +169,7 @@ def can_open_position_direction(symbol, side):
 
 # ---------- Синхронизация с биржей ----------
 def sync_positions_with_exchange():
-    """Синхронизация позиций с биржей и отслеживание SL"""
+    """✅ ИСПРАВЛЕНО: Синхронизация позиций с логированием SL"""
     if TEST_MODE:
         return
     
@@ -213,6 +213,8 @@ def sync_positions_with_exchange():
                 
                 sl_triggers = [o for o in ex_orders if o["symbol"] == hl_sym and o.get("tpsl") == "sl"]
                 
+                close_reason = None
+                
                 if recent_tp:
                     tp_time = datetime.fromisoformat(recent_tp[0])
                     if (datetime.now() - tp_time).total_seconds() < 300:  # 5 минут
@@ -238,6 +240,22 @@ def sync_positions_with_exchange():
                     print(f"🟢 {sym_db}: Позиция закрыта по TP для {direction}")
                 else:
                     close_reason = "manual"
+                
+                # ✅ КРИТИЧНО: Если закрыта по SL - логируем событие
+                if close_reason == "sl":
+                    # Проверяем, не было ли уже логирования
+                    existing_sl = conn.execute(
+                        """
+                        SELECT id FROM trade_events
+                        WHERE symbol = ? AND event_type = 'sl' AND side = ?
+                        AND event_time > datetime('now', '-5 minutes')
+                        """,
+                        (sym_db, direction),
+                    ).fetchone()
+                    
+                    if not existing_sl:
+                        log_trade_event(sym_db, "sl", direction, f"Position closed by SL")
+                        print(f"📝 Логирование SL события для {sym_db} {direction}")
                 
                 cur.execute(
                     "UPDATE positions SET status='closed', closed_at=datetime('now'), close_reason=? WHERE id=?",
@@ -300,13 +318,16 @@ def sync_positions_with_exchange():
 
 # ---------- Расчёт размера позиции ----------
 def calculate_position_size(symbol, data_dict):
-    """Расчёт размера позиции с учётом ATR"""
+    """✅ ИСПРАВЛЕНО: Расчёт размера позиции с учётом доступного баланса"""
     if TEST_MODE:
         balance = TEST_BALANCE
+        available = TEST_BALANCE
     else:
         balance = hl_api.get_balance()
+        available = hl_api.get_available_balance()
     
-    if balance <= 0:
+    if balance <= 0 or available <= 0:
+        print(f"⚠️ Недостаточно средств: баланс ${balance:.2f}, доступно ${available:.2f}")
         return 0, 0
     
     # Используем 1H для ATR
@@ -334,7 +355,8 @@ def calculate_position_size(symbol, data_dict):
             print(f"⚠️ {symbol}: Достигнут лимит позиции ({MAX_TOTAL_POSITION_PERCENT}%)")
             return 0, 0
     
-    position_value = balance * (POSITION_SIZE_PERCENT / 100)
+    # ✅ КРИТИЧНО: Используем доступный баланс вместо полного
+    position_value = min(available, balance) * (POSITION_SIZE_PERCENT / 100)
     quantity = position_value / mid_price
     
     # Округление
@@ -357,11 +379,11 @@ def calculate_stop_loss(entry_price, side, atr):
 
 # ---------- Размещение ордера ----------
 def place_order(symbol, side, quantity, atr):
-    """Размещение ордера и установка SL/TP"""
+    """✅ ИСПРАВЛЕНО: Размещение ордера с проверкой cooldown"""
     try:
         coin = symbol.replace("USDT", "")
         
-        # Проверка cooldown
+        # ✅ КРИТИЧНО: Проверка cooldown после SL
         can_open, msg = can_open_position_direction(symbol, side)
         if not can_open:
             print(f"🚫 {symbol}: {msg}")
@@ -481,9 +503,17 @@ def get_balance():
         return hl_api.get_balance()
 
 
+def get_available_balance():
+    """Получение доступного баланса"""
+    if TEST_MODE:
+        return TEST_BALANCE
+    else:
+        return hl_api.get_available_balance()
+
+
 # ---------- Управление позициями ----------
 def check_positions():
-    """Проверка и обновление SL/TP для открытых позиций"""
+    """✅ ИСПРАВЛЕНО: Проверка с правильным определением TP при доборе"""
     if TEST_MODE:
         return
     
@@ -523,12 +553,24 @@ def check_positions():
                 
                 pos_id, orig_qty, tp1_hit, tp2_hit, tp2_count, atr, snapshot_size, db_entry_price = pos_data
                 
+                # Обновляем Entry Price из биржи
                 if abs(entry_price - db_entry_price) > 0.01:
                     cur.execute(
                         "UPDATE positions SET entry_price=? WHERE id=?",
                         (entry_price, pos_id)
                     )
                     conn.commit()
+                
+                # ✅ КРИТИЧНО: При доборе обновляем original_quantity
+                if current_size > orig_qty * 1.05:  # Увеличение более чем на 5%
+                    print(f"📊 {sym}: Обнаружен добор, обновляем original_quantity: {orig_qty:.4f} → {current_size:.4f}")
+                    cur.execute(
+                        "UPDATE positions SET original_quantity=?, last_known_size=? WHERE id=?",
+                        (current_size, current_size, pos_id)
+                    )
+                    conn.commit()
+                    orig_qty = current_size
+                    snapshot_size = current_size
                 
                 coin_orders = [o for o in ex_orders if o["symbol"] == sym and o.get("reduce_only")]
                 sl_orders = [o for o in coin_orders if o.get("tpsl") == "sl"]
@@ -557,30 +599,45 @@ def check_positions():
                     if len(tp_orders) > 1:
                         needs_tp_update = True
                 
-                # Обнаружение срабатывания TP
-                if orig_qty > 0:
+                # ✅ ИСПРАВЛЕНИЕ: Обнаружение срабатывания TP только при УМЕНЬШЕНИИ размера
+                if orig_qty > 0 and snapshot_size > 0:
                     remaining_pct = (current_size / orig_qty) * 100
                     
-                    if not tp1_hit and remaining_pct < 75:
-                        log_trade_event(sym_db, "tp", direction, f"TP1 triggered")
-                        cur.execute("UPDATE positions SET tp1_hit=1 WHERE id=?", (pos_id,))
-                        conn.commit()
-                        tp1_hit = 1
-                        needs_tp_update = True
-                        needs_sl_update = True
-                        print(f"✅ {sym}: TP1 сработал ({remaining_pct:.1f}% осталось)")
-                    
-                    if tp1_hit and not tp2_hit and snapshot_size:
-                        if current_size < snapshot_size * 0.95:
-                            log_trade_event(sym_db, "tp", direction, f"TP2 triggered")
-                            cur.execute("UPDATE positions SET tp2_hit=1, tp2_count=tp2_count+1 WHERE id=?", (pos_id,))
+                    # TP1 сработал: размер уменьшился И не было TP1 ранее
+                    if not tp1_hit and current_size < snapshot_size * 0.98:  # Уменьшение более чем на 2%
+                        if remaining_pct < 75:  # И осталось меньше 75%
+                            log_trade_event(sym_db, "tp", direction, f"TP1 triggered")
+                            cur.execute("UPDATE positions SET tp1_hit=1, last_known_size=? WHERE id=?", (current_size, pos_id))
                             conn.commit()
-                            tp2_hit = 1
-                            tp2_count += 1
+                            tp1_hit = 1
                             needs_tp_update = True
-                            print(f"✅ {sym}: TP2 сработал ({remaining_pct:.1f}% осталось)")
+                            needs_sl_update = True
+                            print(f"✅ {sym}: TP1 сработал ({remaining_pct:.1f}% осталось)")
+                            snapshot_size = current_size
+                    
+                    # TP2 сработал: размер уменьшился после TP1
+                    elif tp1_hit and not tp2_hit and current_size < snapshot_size * 0.98:
+                        log_trade_event(sym_db, "tp", direction, f"TP2 triggered")
+                        cur.execute("UPDATE positions SET tp2_hit=1, tp2_count=tp2_count+1, last_known_size=? WHERE id=?", (current_size, pos_id))
+                        conn.commit()
+                        tp2_hit = 1
+                        tp2_count += 1
+                        needs_tp_update = True
+                        print(f"✅ {sym}: TP2 сработал ({remaining_pct:.1f}% осталось)")
+                        snapshot_size = current_size
+                    
+                    # TP2 (множественные): размер уменьшился после предыдущего TP2
+                    elif tp1_hit and tp2_hit and current_size < snapshot_size * 0.98:
+                        log_trade_event(sym_db, "tp", direction, f"TP2 triggered again")
+                        cur.execute("UPDATE positions SET tp2_count=tp2_count+1, last_known_size=? WHERE id=?", (current_size, pos_id))
+                        conn.commit()
+                        tp2_count += 1
+                        needs_tp_update = True
+                        print(f"✅ {sym}: TP2 #{tp2_count + 1} сработал ({remaining_pct:.1f}% осталось)")
+                        snapshot_size = current_size
                 
-                if abs(current_size - snapshot_size) > current_size * 0.05:
+                # Обновляем snapshot при значительном изменении (но не считаем это TP)
+                if abs(current_size - snapshot_size) > current_size * 0.05 and current_size >= snapshot_size:
                     cur.execute("UPDATE positions SET last_known_size=? WHERE id=?", (current_size, pos_id))
                     conn.commit()
                 
@@ -601,6 +658,7 @@ def check_positions():
                 
                 if needs_tp_update:
                     if not tp1_hit:
+                        # TP1: 30% от original_quantity
                         tp1_price = entry_price * (1 + TAKE_PROFIT_1_PERCENT / 100) if direction == "long" else entry_price * (1 - TAKE_PROFIT_1_PERCENT / 100)
                         tp1_size = orig_qty * (TAKE_PROFIT_1_SIZE_PERCENT / 100)
                         
@@ -608,17 +666,21 @@ def check_positions():
                         if result and result.get("status") == "ok":
                             updated_count += 1
                     
-                    elif remaining_pct > 1.0:
-                        tp2_number = tp2_count + 1
-                        tp_offset = TAKE_PROFIT_1_PERCENT + (TAKE_PROFIT_2_PERCENT * tp2_number)
+                    else:
+                        # TP2: 20% от текущего размера, прогрессивная цена
+                        remaining_pct = (current_size / orig_qty) * 100
                         
-                        tp2_price = entry_price * (1 + tp_offset / 100) if direction == "long" else entry_price * (1 - tp_offset / 100)
-                        tp2_size = current_size * (TAKE_PROFIT_2_SIZE_PERCENT / 100)
-                        
-                        if tp2_size >= 0.0001:
-                            result = hl_api.set_tp_only(sym, tp2_price, tp2_size)
-                            if result and result.get("status") == "ok":
-                                updated_count += 1
+                        if remaining_pct > 1.0:
+                            tp2_number = tp2_count + 1
+                            tp_offset = TAKE_PROFIT_1_PERCENT + (TAKE_PROFIT_2_PERCENT * tp2_number)
+                            
+                            tp2_price = entry_price * (1 + tp_offset / 100) if direction == "long" else entry_price * (1 - tp_offset / 100)
+                            tp2_size = current_size * (TAKE_PROFIT_2_SIZE_PERCENT / 100)
+                            
+                            if tp2_size >= 0.0001:
+                                result = hl_api.set_tp_only(sym, tp2_price, tp2_size)
+                                if result and result.get("status") == "ok":
+                                    updated_count += 1
                     
                     time.sleep(1.0)
             
@@ -708,11 +770,12 @@ def main():
     
     if TEST_MODE:
         print("⚠️ ТЕСТОВЫЙ РЕЖИМ")
-        print(f"💰 Баланс: ${TEST_BALANCE:.2f}")
+        print(f"💰 Баланс: ${TEST_BALANCE:.2f} | Доступно: ${TEST_BALANCE:.2f}")
     else:
         print("🔴 РЕАЛЬНЫЙ РЕЖИМ")
         bal = get_balance()
-        print(f"💰 Баланс: ${bal:.2f}")
+        available = get_available_balance()
+        print(f"💰 Баланс: ${bal:.2f} | Доступно: ${available:.2f}")
         
         if bal <= 0:
             print("❌ Недостаточно средств")
@@ -724,7 +787,7 @@ def main():
     print(f"📊 TP1: +{TAKE_PROFIT_1_PERCENT}% ({TAKE_PROFIT_1_SIZE_PERCENT}% позиции)")
     print(f"📊 TP2: +{TAKE_PROFIT_2_PERCENT}% ({TAKE_PROFIT_2_SIZE_PERCENT}% остатка)")
     print(f"📊 После TP1: SL → безубыток (Entry Price)")
-    print(f"📊 После TP2: новый TP2 на остаток (прогрессия +{TAKE_PROFIT_2_PERCENT}%)")
+    print(f"📊 После TP2: новый TP2n на остаток (прогрессия +{TAKE_PROFIT_2_PERCENT}%)")
     print(f"📊 Начальный SL: ATR×{ATR_MULTIPLIER}")
     
     if ENABLE_NO_ADD_AFTER_TP:
@@ -737,6 +800,12 @@ def main():
     
     while True:
         try:
+            # ✅ Проверка баланса в каждом цикле
+            if not TEST_MODE:
+                bal = get_balance()
+                available = get_available_balance()
+                print(f"\n💰 Баланс: ${bal:.2f} | Доступно: ${available:.2f}")
+            
             symbols = SYMBOLS[:MAX_SYMBOLS]
             data = get_market_data(symbols)
             

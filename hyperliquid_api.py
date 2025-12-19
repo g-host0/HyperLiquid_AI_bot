@@ -112,6 +112,25 @@ class HyperliquidAPI:
             print(f"❌ Ошибка получения баланса: {e}")
             return 0.0
 
+    def get_available_balance(self):
+        """Получение доступного для торговли баланса."""
+        try:
+            if not self.info or not self.address:
+                return 0.0
+        
+            user_state = self.info.user_state(self.address)
+            if user_state and "marginSummary" in user_state:
+                margin_summary = user_state["marginSummary"]
+                # Available = accountValue - totalMarginUsed
+                account_value = float(margin_summary.get("accountValue", 0))
+                total_margin_used = float(margin_summary.get("totalMarginUsed", 0))
+                available = account_value - total_margin_used
+                return max(0.0, available)
+            return 0.0
+        except Exception as e:
+            print(f"❌ Ошибка получения доступного баланса: {e}")
+            return 0.0
+
     def get_mid_price(self, coin):
         """Получение средней цены."""
         try:
