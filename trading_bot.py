@@ -52,7 +52,7 @@ def init_db():
         )
         """)
         
-        # Таблица событий для TP/SL
+        # Таблица событий для TP/SL и противоположных сигналов
         cur.execute("""
         CREATE TABLE IF NOT EXISTS trade_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,13 +100,34 @@ def init_db():
 
 # ---------- Логирование событий ----------
 def log_trade_event(symbol, event_type, side, details=""):
-    """Логирование торговых событий (TP/SL)"""
+    """Логирование торговых событий (TP/SL/opposite_signal)"""
     with sqlite3.connect("positions.db") as conn:
         conn.execute(
             "INSERT INTO trade_events (symbol, event_type, side, details) VALUES (?, ?, ?, ?)",
             (symbol, event_type, side, details),
         )
         conn.commit()
+
+
+# ---------- Проверка противоположных сигналов ----------
+def count_opposite_signals(symbol, desired_direction):
+    """
+    Подсчёт противоположных сигналов за последние 30 минут.
+    Возвращает количество сигналов.
+    """
+    cutoff_time = datetime.now() - timedelta(minutes=30)
+    
+    with sqlite3.connect("positions.db") as conn:
+        count = conn.execute(
+            """
+            SELECT COUNT(*) FROM trade_events
+            WHERE symbol = ? AND event_type = 'opposite_signal' AND side = ?
+            AND event_time > datetime(?)
+            """,
+            (symbol, desired_direction, cutoff_time.isoformat()),
+        ).fetchone()[0]
+    
+    return count
 
 
 # ---------- Cooldown логика ----------
@@ -165,6 +186,36 @@ def can_open_position_direction(symbol, side):
             return False, f"⏰ {direction.upper()} запрещён {remaining_minutes} мин после SL"
     
     return True, ""
+
+
+# ---------- Проверка противоположной позиции ----------
+def has_opposite_position(symbol, side):
+    """
+    Проверка наличия противоположной позиции.
+    Возвращает (has_opposite, opposite_side, opposite_size)
+    """
+    if TEST_MODE:
+        return False, None, 0
+    
+    coin = symbol.replace("USDT", "")
+    ex_positions = hl_api.get_open_positions()
+    
+    existing = next((p for p in ex_positions if p["symbol"] == coin), None)
+    
+    if not existing:
+        return False, None, 0
+    
+    existing_side = existing["side"]  # "long" или "short"
+    existing_size = existing["size"]
+    
+    # Определяем желаемое направление
+    desired_direction = "long" if side == "buy" else "short"
+    
+    # Если есть позиция в противоположном направлении
+    if existing_side != desired_direction:
+        return True, existing_side, existing_size
+    
+    return False, None, 0
 
 
 # ---------- Синхронизация с биржей ----------
@@ -379,9 +430,60 @@ def calculate_stop_loss(entry_price, side, atr):
 
 # ---------- Размещение ордера ----------
 def place_order(symbol, side, quantity, atr):
-    """✅ ИСПРАВЛЕНО: Размещение ордера с проверкой cooldown"""
+    """✅ ИСПРАВЛЕНО: Размещение ордера с автоматическим переворотом после 2 сигналов"""
     try:
         coin = symbol.replace("USDT", "")
+        desired_direction = "long" if side == "buy" else "short"
+        
+        # ✅ ПРОВЕРКА: Есть ли противоположная позиция?
+        has_opposite, opposite_side, opposite_size = has_opposite_position(symbol, side)
+        
+        if has_opposite:
+            opposite_direction = "LONG" if opposite_side == "long" else "SHORT"
+            new_direction = "SHORT" if opposite_side == "long" else "LONG"
+            
+            # Подсчитываем противоположные сигналы за последние 30 минут
+            signal_count = count_opposite_signals(symbol, desired_direction)
+            
+            # Логируем текущий сигнал
+            log_trade_event(symbol, "opposite_signal", desired_direction, f"Signal #{signal_count + 1}")
+            
+            print(f"⚠️ {symbol}: Позиция {opposite_direction} открыта ({opposite_size:.4f})")
+            print(f"   🔄 Противоположный сигнал #{signal_count + 1}/2 для переворота в {new_direction}")
+            
+            if signal_count + 1 < 2:
+                print(f"   ⏰ Ожидание ещё {2 - (signal_count + 1)} сигнала(ов) в течение 30 минут")
+                return
+            
+            # ✅ ПЕРЕВОРОТ: 2 сигнала получены
+            print(f"   ✅ 2 сигнала получены! Закрываем {opposite_direction} и открываем {new_direction}")
+            
+            # Закрываем противоположную позицию
+            close_side = "sell" if opposite_side == "long" else "buy"
+            result = hl_api.place_order(coin, close_side, opposite_size, "Market")
+            
+            if result and result.get("status") == "ok":
+                print(f"✅ Позиция {opposite_direction} закрыта")
+                time.sleep(2)
+                
+                # Закрываем в БД
+                with sqlite3.connect("positions.db") as conn:
+                    conn.execute(
+                        "UPDATE positions SET status='closed', closed_at=datetime('now'), close_reason='flip' WHERE symbol=? AND status='open'",
+                        (symbol,)
+                    )
+                    conn.commit()
+                
+                # Удаляем старые сигналы переворота
+                with sqlite3.connect("positions.db") as conn:
+                    conn.execute(
+                        "DELETE FROM trade_events WHERE symbol=? AND event_type='opposite_signal'",
+                        (symbol,)
+                    )
+                    conn.commit()
+            else:
+                print(f"❌ Не удалось закрыть {opposite_direction}, переворот отменён")
+                return
         
         # ✅ КРИТИЧНО: Проверка cooldown после SL
         can_open, msg = can_open_position_direction(symbol, side)
@@ -389,7 +491,7 @@ def place_order(symbol, side, quantity, atr):
             print(f"🚫 {symbol}: {msg}")
             return
         
-        # Проверка возможности добора
+        # Проверка возможности добора (только для той же стороны)
         ex_positions = hl_api.get_open_positions() if not TEST_MODE else []
         existing = next((p for p in ex_positions if p["symbol"] == coin), None)
         
@@ -787,7 +889,7 @@ def main():
     print(f"📊 TP1: +{TAKE_PROFIT_1_PERCENT}% ({TAKE_PROFIT_1_SIZE_PERCENT}% позиции)")
     print(f"📊 TP2: +{TAKE_PROFIT_2_PERCENT}% ({TAKE_PROFIT_2_SIZE_PERCENT}% остатка)")
     print(f"📊 После TP1: SL → безубыток (Entry Price)")
-    print(f"📊 После TP2: новый TP2n на остаток (прогрессия +{TAKE_PROFIT_2_PERCENT}%)")
+    print(f"📊 После TP2: новый TP2 на остаток (прогрессия +{TAKE_PROFIT_2_PERCENT}%)")
     print(f"📊 Начальный SL: ATR×{ATR_MULTIPLIER}")
     
     if ENABLE_NO_ADD_AFTER_TP:
@@ -795,6 +897,8 @@ def main():
     
     if ENABLE_NO_REOPEN_AFTER_SL:
         print(f"🚫 Запрет переоткрытия после SL: {NO_REOPEN_AFTER_SL_MINUTES} мин")
+    
+    print(f"🔄 Автопереворот: после 2 сигналов в течение 30 мин")
     
     print("=" * 60)
     

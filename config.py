@@ -56,7 +56,7 @@ ATR_MULTIPLIER = 1.5
 # Take Profit
 TAKE_PROFIT_1_PERCENT = 1.0
 TAKE_PROFIT_1_SIZE_PERCENT = 30.0
-TAKE_PROFIT_2_PERCENT = 1.0  # ✅ Шаг 2% для TP2
+TAKE_PROFIT_2_PERCENT = 1.0  # ✅ Шаг 1% для TP2
 TAKE_PROFIT_2_SIZE_PERCENT = 20.0
 
 # Защита от переторговки
@@ -91,7 +91,7 @@ AI_SYSTEM_PROMPT = """Ты профессиональный криптотрей
 
 ### Формат ответа:
 Action: buy_ETHUSDT | sell_BTCUSDT | hold
-Reason: [Краткое обоснование, до 20 слов]"""
+Reason: [Краткое обоснование, до 20 слов на русском]"""
 
 AI_USER_DATA_TEMPLATE = """Данные рынка:
 

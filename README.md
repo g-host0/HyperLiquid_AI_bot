@@ -50,8 +50,8 @@ Python 3.9+ (протестировано на 3.12)
 
 ### 1. Клонирование репозитория
 ```bash
-git clone <your-repo>
-cd hyperliquid-bot
+git clone https://github.com/g-host0/HyperLiquid_AI_bot.git
+cd HyperLiquid_AI_bot
 ```
 
 ### 2. Установка зависимостей
