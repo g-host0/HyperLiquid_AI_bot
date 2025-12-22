@@ -799,22 +799,26 @@ def display_positions_summary():
     """Отображение сводки по открытым позициям"""
     try:
         if TEST_MODE:
+            now = datetime.now().strftime("%H:%M:%S %d.%m.%Y")
             print("\n" + "=" * 60)
-            print("📊 ТЕСТОВЫЙ РЕЖИМ - позиции не отображаются")
+            print(f"📊 ТЕСТОВЫЙ РЕЖИМ - позиции не отображаются на {now}")
             print("=" * 60)
             return
         
         ex_positions = hl_api.get_open_positions()
         ex_orders = hl_api.get_open_orders()
         
+        # Получаем текущую дату и время
+        now = datetime.now().strftime("%H:%M:%S %d.%m.%Y")
+        
         if not ex_positions:
             print("\n" + "=" * 60)
-            print("📊 НЕТ ОТКРЫТЫХ ПОЗИЦИЙ")
+            print(f"📊 НЕТ ОТКРЫТЫХ ПОЗИЦИЙ на {now}")
             print("=" * 60)
             return
         
         print("\n" + "=" * 60)
-        print("📊 ОТКРЫТЫЕ ПОЗИЦИИ")
+        print(f"📊 ОТКРЫТЫЕ ПОЗИЦИИ на {now}")
         print("=" * 60)
         
         for pos in ex_positions:
@@ -860,7 +864,6 @@ def display_positions_summary():
     except Exception as e:
         print(f"❌ Ошибка отображения позиций: {e}")
         traceback.print_exc()
-
 
 # ---------- main ----------
 def main():
