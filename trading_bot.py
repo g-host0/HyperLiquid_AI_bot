@@ -565,9 +565,9 @@ def place_order(symbol, side, quantity, atr):
             
             conn.commit()
         
-        # Установка SL
+        # Установка SL с явным размером
         sl_price = calculate_stop_loss(entry_price, side, atr)
-        result_sl = hl_api.set_sl_only(coin, sl_price)
+        result_sl = hl_api.set_sl_only(coin, sl_price, current_size)  # ✅ ДОБАВЛЕН current_size
         
         if result_sl and result_sl.get("status") == "ok":
             print(f"✅ SL установлен по ATR @ ${sl_price:.2f}")
@@ -746,13 +746,13 @@ def check_positions():
                 # Создание новых ордеров
                 if needs_sl_update:
                     if tp1_hit:
-                        result = hl_api.set_sl_only(sym, entry_price)
+                        result = hl_api.set_sl_only(sym, entry_price, current_size)  # ✅ ДОБАВЛЕН current_size
                         if result and result.get("status") == "ok":
                             updated_count += 1
                     else:
                         if atr and atr > 0:
                             sl_price = calculate_stop_loss(entry_price, side_db, atr)
-                            result = hl_api.set_sl_only(sym, sl_price)
+                            result = hl_api.set_sl_only(sym, sl_price, current_size)  # ✅ ДОБАВЛЕН current_size
                             if result and result.get("status") == "ok":
                                 updated_count += 1
                     
@@ -864,6 +864,7 @@ def display_positions_summary():
     except Exception as e:
         print(f"❌ Ошибка отображения позиций: {e}")
         traceback.print_exc()
+
 
 # ---------- main ----------
 def main():

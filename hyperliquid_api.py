@@ -9,6 +9,7 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 from eth_account import Account
 from decimal import Decimal, ROUND_DOWN
+
 from config import (
     HYPERLIQUID_API_URL,
     HYPERLIQUID_ACCOUNT_ADDRESS,
@@ -44,10 +45,12 @@ class HyperliquidAPI:
             )
             
             self._load_asset_metadata()
+            
             env = "Testnet" if USE_TESTNET else "Mainnet"
             print(f"🌐 Hyperliquid: {env}")
             print(f"📍 API URL: {HYPERLIQUID_API_URL}")
             print("✅ SDK инициализирован")
+            
         except Exception as e:
             print(f"❌ Ошибка инициализации Hyperliquid SDK: {e}")
             import traceback
@@ -64,8 +67,8 @@ class HyperliquidAPI:
                 for asset in meta["universe"]:
                     coin = asset.get("name", "")
                     sz_decimals = asset.get("szDecimals", 8)
-                    
                     max_lev_obj = asset.get("maxLeverage", 50)
+                    
                     if isinstance(max_lev_obj, dict):
                         max_leverage = int(max_lev_obj.get("value", 50))
                     else:
@@ -92,10 +95,12 @@ class HyperliquidAPI:
             return 0.0
         
         from math import log10, floor
+        
         price_decimal = Decimal(str(price))
         magnitude = floor(log10(abs(float(price))))
         scale = max_sig_figs - 1 - magnitude
         rounded = round(float(price_decimal), int(scale))
+        
         return rounded
 
     def get_balance(self):
@@ -117,7 +122,7 @@ class HyperliquidAPI:
         try:
             if not self.info or not self.address:
                 return 0.0
-        
+            
             user_state = self.info.user_state(self.address)
             if user_state and "marginSummary" in user_state:
                 margin_summary = user_state["marginSummary"]
@@ -191,6 +196,7 @@ class HyperliquidAPI:
         """Получение открытых ордеров с кешированием."""
         try:
             current_time = time.time()
+            
             if not force_refresh and (current_time - self._last_orders_fetch) < 2.0:
                 return self._orders_cache
             
@@ -209,7 +215,6 @@ class HyperliquidAPI:
             pos_dict = {p["symbol"]: p for p in positions}
             
             orders = []
-            
             for order in open_orders:
                 coin = order.get("coin", "")
                 oid = order.get("oid", 0)
@@ -219,7 +224,6 @@ class HyperliquidAPI:
                 is_reduce_only = order.get("reduceOnly", False)
                 
                 order_type_data = order.get("orderType", {})
-                
                 is_trigger = False
                 tpsl = None
                 trigger_price = None
@@ -228,19 +232,15 @@ class HyperliquidAPI:
                     if "trigger" in order_type_data:
                         is_trigger = True
                         trigger_info = order_type_data["trigger"]
-                        
                         if isinstance(trigger_info, dict):
                             trigger_price = trigger_info.get("triggerPx")
                             if trigger_price:
                                 trigger_price = float(trigger_price)
-                            
                             tpsl = trigger_info.get("tpsl")
                             if tpsl == "":
                                 tpsl = None
-                    
                     elif "limit" in order_type_data:
                         is_trigger = False
-                    
                     elif "triggerPx" in order_type_data:
                         is_trigger = True
                         trigger_price = float(order_type_data.get("triggerPx", 0))
@@ -259,15 +259,14 @@ class HyperliquidAPI:
                             tpsl = "tp" if trigger_price > current_price else "sl"
                         else:
                             tpsl = "tp" if trigger_price < current_price else "sl"
-                    
                     elif size >= pos_size * 0.95:
                         tpsl = "sl"
                     else:
                         tpsl = "tp"
-                    
-                    if not is_trigger and tpsl:
-                        is_trigger = True
-                        trigger_price = limit_px
+                
+                if not is_trigger and tpsl:
+                    is_trigger = True
+                    trigger_price = limit_px
                 
                 order_data = {
                     "symbol": coin,
@@ -285,7 +284,6 @@ class HyperliquidAPI:
             
             self._orders_cache = orders
             self._last_orders_fetch = current_time
-            
             return orders
         
         except Exception as e:
@@ -309,8 +307,8 @@ class HyperliquidAPI:
             size = round(size, sz_decimals)
             
             is_buy = side.lower() == "buy"
-            mid = self.get_mid_price(coin)
             
+            mid = self.get_mid_price(coin)
             if not mid:
                 print(f"❌ Не удалось получить цену {coin}")
                 return None
@@ -356,6 +354,7 @@ class HyperliquidAPI:
                     limit_final,
                     {"limit": {"tif": "Gtc"}},
                 )
+            
             else:
                 print("❌ Неправильный тип ордера")
                 return None
@@ -366,7 +365,6 @@ class HyperliquidAPI:
                     if response.get("type") == "order":
                         data = response.get("data", {})
                         statuses = data.get("statuses", [])
-                        
                         if statuses:
                             status = statuses[0]
                             
@@ -415,22 +413,22 @@ class HyperliquidAPI:
             print(f"❌ Ошибка отмены ордера: {e}")
             return None
 
-    def set_sl_only(self, coin, trigger_price):
-        """Установка Stop Loss."""
+    def set_sl_only(self, coin, trigger_price, size=None):
+        """✅ ИСПРАВЛЕНО: Установка Stop Loss с явным размером."""
         try:
             if not self.exchange:
                 return None
             
             time.sleep(1.5)
             orders = self.get_open_orders(force_refresh=True)
-            
             existing_sl = [o for o in orders if o["symbol"] == coin and o.get("tpsl") == "sl"]
             
             if existing_sl:
                 for old_order in existing_sl:
                     self.cancel_order(coin, old_order["oid"])
-                    time.sleep(0.2)
-                time.sleep(1.0)
+                time.sleep(0.2)
+            
+            time.sleep(1.0)
             
             positions = self.get_open_positions()
             position = next((p for p in positions if p["symbol"] == coin), None)
@@ -438,7 +436,8 @@ class HyperliquidAPI:
             if not position:
                 return None
             
-            size = position["size"]
+            # ✅ КРИТИЧНО: Используем size из параметра или из позиции
+            position_size = size if size is not None else position["size"]
             entry_price = position["entry_price"]
             is_long = position["side"] == "long"
             
@@ -450,27 +449,24 @@ class HyperliquidAPI:
                 return None
             
             sz_decimals = self.asset_info[coin]["sz_decimals"]
-            
             trigger_px = self.round_price_sig_figs(trigger_price, max_sig_figs=5)
             
             if is_long:
                 if trigger_px >= current_price * 0.999:
                     trigger_px = min(trigger_px, entry_price * 0.995, current_price * 0.997)
                     trigger_px = self.round_price_sig_figs(trigger_px, max_sig_figs=5)
-                
-                if trigger_px >= current_price * 0.998:
-                    print(f"⚠️ SL слишком близко: {trigger_px:.4f} >= {current_price:.4f}")
-                    return None
+                    if trigger_px >= current_price * 0.998:
+                        print(f"⚠️ SL слишком близко: {trigger_px:.4f} >= {current_price:.4f}")
+                        return None
             else:
                 if trigger_px <= current_price * 1.001:
                     trigger_px = max(trigger_px, entry_price * 1.005, current_price * 1.003)
                     trigger_px = self.round_price_sig_figs(trigger_px, max_sig_figs=5)
-                
-                if trigger_px <= current_price * 1.002:
-                    print(f"⚠️ SL слишком близко: {trigger_px:.4f} <= {current_price:.4f}")
-                    return None
+                    if trigger_px <= current_price * 1.002:
+                        print(f"⚠️ SL слишком близко: {trigger_px:.4f} <= {current_price:.4f}")
+                        return None
             
-            size = round(size, sz_decimals)
+            sl_size = round(position_size, sz_decimals)
             
             order_type = {
                 "trigger": {
@@ -483,15 +479,15 @@ class HyperliquidAPI:
             result = self.exchange.order(
                 coin,
                 not is_long,
-                size,
+                sl_size,
                 trigger_px,
                 order_type,
                 reduce_only=True
             )
             
             self._last_orders_fetch = 0
-            
             return result
+        
         except Exception as e:
             print(f"❌ Ошибка установки SL: {e}")
             import traceback
@@ -506,14 +502,14 @@ class HyperliquidAPI:
             
             time.sleep(1.5)
             orders = self.get_open_orders(force_refresh=True)
-            
             existing_tp = [o for o in orders if o["symbol"] == coin and o.get("tpsl") == "tp"]
             
             if existing_tp:
                 for old_order in existing_tp:
                     self.cancel_order(coin, old_order["oid"])
-                    time.sleep(0.2)
-                time.sleep(1.0)
+                time.sleep(0.2)
+            
+            time.sleep(1.0)
             
             positions = self.get_open_positions()
             position = next((p for p in positions if p["symbol"] == coin), None)
@@ -532,7 +528,6 @@ class HyperliquidAPI:
                 return None
             
             sz_decimals = self.asset_info[coin]["sz_decimals"]
-            
             trigger_px = self.round_price_sig_figs(trigger_price, max_sig_figs=5)
             tp_size = round(size, sz_decimals)
             
@@ -540,18 +535,16 @@ class HyperliquidAPI:
                 if trigger_px <= current_price * 1.001:
                     trigger_px = max(current_price * 1.003, entry_price * 1.005)
                     trigger_px = self.round_price_sig_figs(trigger_px, max_sig_figs=5)
-                
-                if trigger_px <= current_price * 1.002:
-                    print(f"⚠️ TP слишком близко: {trigger_px:.4f} <= {current_price:.4f}")
-                    return None
+                    if trigger_px <= current_price * 1.002:
+                        print(f"⚠️ TP слишком близко: {trigger_px:.4f} <= {current_price:.4f}")
+                        return None
             else:
                 if trigger_px >= current_price * 0.999:
                     trigger_px = min(current_price * 0.997, entry_price * 0.995)
                     trigger_px = self.round_price_sig_figs(trigger_px, max_sig_figs=5)
-                
-                if trigger_px >= current_price * 0.998:
-                    print(f"⚠️ TP слишком близко: {trigger_px:.4f} >= {current_price:.4f}")
-                    return None
+                    if trigger_px >= current_price * 0.998:
+                        print(f"⚠️ TP слишком близко: {trigger_px:.4f} >= {current_price:.4f}")
+                        return None
             
             order_type = {
                 "trigger": {
@@ -571,8 +564,8 @@ class HyperliquidAPI:
             )
             
             self._last_orders_fetch = 0
-            
             return result
+        
         except Exception as e:
             print(f"❌ Ошибка установки TP: {e}")
             import traceback
