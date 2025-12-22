@@ -613,6 +613,75 @@ def get_available_balance():
         return hl_api.get_available_balance()
 
 
+# ---------- Проверка критичных ордеров ----------
+def ensure_critical_orders():
+    """✅ НОВОЕ: Проверка и восстановление критичных SL/TP ордеров"""
+    if TEST_MODE:
+        return
+    
+    try:
+        ex_positions = hl_api.get_open_positions()
+        if not ex_positions:
+            return
+        
+        time.sleep(1.0)
+        ex_orders = hl_api.get_open_orders(force_refresh=True)
+        
+        with sqlite3.connect("positions.db") as conn:
+            cur = conn.cursor()
+            
+            for position in ex_positions:
+                sym = position["symbol"]
+                sym_db = sym + "USDT"
+                side = position["side"]
+                side_db = "buy" if side == "long" else "sell"
+                current_size = position["size"]
+                entry_price = position["entry_price"]
+                
+                # Проверяем наличие SL
+                coin_orders = [o for o in ex_orders if o["symbol"] == sym and o.get("reduce_only")]
+                sl_orders = [o for o in coin_orders if o.get("tpsl") == "sl"]
+                
+                if not sl_orders:
+                    print(f"⚠️ {sym}: Отсутствует SL! Восстанавливаем...")
+                    
+                    # Получаем данные из БД
+                    pos_data = cur.execute(
+                        "SELECT atr, tp1_hit FROM positions WHERE symbol=? AND side=? AND status='open'",
+                        (sym_db, side_db),
+                    ).fetchone()
+                    
+                    if pos_data:
+                        atr, tp1_hit = pos_data
+                        
+                        if tp1_hit:
+                            # После TP1 - SL на безубыток
+                            sl_price = entry_price
+                        else:
+                            # Начальный SL по ATR
+                            if atr and atr > 0:
+                                sl_price = calculate_stop_loss(entry_price, side_db, atr)
+                            else:
+                                # Если ATR нет - используем фиксированный процент
+                                if side_db == "buy":
+                                    sl_price = entry_price * 0.985  # -1.5%
+                                else:
+                                    sl_price = entry_price * 1.015  # +1.5%
+                        
+                        result = hl_api.set_sl_only(sym, sl_price, current_size)
+                        
+                        if result and result.get("status") == "ok":
+                            print(f"✅ {sym}: SL восстановлен @ ${sl_price:.2f}")
+                        else:
+                            print(f"❌ {sym}: Не удалось восстановить SL")
+                        
+                        time.sleep(1.0)
+    
+    except Exception as e:
+        print(f"❌ Ошибка проверки критичных ордеров: {e}")
+        traceback.print_exc()
+
+
 # ---------- Управление позициями ----------
 def check_positions():
     """✅ ИСПРАВЛЕНО: Проверка с правильным определением TP при доборе"""
@@ -858,6 +927,8 @@ def display_positions_summary():
                     sl_size = sl["size"]
                     sl_pct = (sl_size / size) * 100 if size > 0 else 0
                     print(f"  └─ SL: ${sl_price:.2f} ({sl_pct:.0f}%, объём {sl_size:.4f})")
+            else:
+                print(f"  ⚠️ ВНИМАНИЕ: SL ОТСУТСТВУЕТ!")
         
         print("=" * 60)
     
@@ -903,6 +974,7 @@ def main():
         print(f"🚫 Запрет переоткрытия после SL: {NO_REOPEN_AFTER_SL_MINUTES} мин")
     
     print(f"🔄 Автопереворот: после 2 сигналов в течение 30 мин")
+    print(f"🛡️ Автовосстановление SL: включено")
     
     print("=" * 60)
     
@@ -940,6 +1012,9 @@ def main():
                     
                     if qty > 0 and atr > 0:
                         place_order(sym, act, qty, atr)
+            
+            # ✅ КРИТИЧНО: Проверяем критичные ордера ПЕРЕД основной проверкой
+            ensure_critical_orders()
             
             # ВСЕГДА проверяем позиции
             check_positions()
