@@ -419,6 +419,9 @@ class HyperliquidAPI:
             if not self.exchange:
                 return None
             
+            # ✅ КРИТИЧНО: Сбрасываем кеш перед проверкой
+            self._last_orders_fetch = 0
+            
             time.sleep(1.5)
             orders = self.get_open_orders(force_refresh=True)
             existing_sl = [o for o in orders if o["symbol"] == coin and o.get("tpsl") == "sl"]
@@ -499,6 +502,9 @@ class HyperliquidAPI:
         try:
             if not self.exchange:
                 return None
+            
+            # ✅ КРИТИЧНО: Сбрасываем кеш перед проверкой
+            self._last_orders_fetch = 0
             
             time.sleep(1.5)
             orders = self.get_open_orders(force_refresh=True)
